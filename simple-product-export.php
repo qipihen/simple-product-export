@@ -3,7 +3,7 @@
 Plugin Name: 产品导入导出工具
 Plugin URI: https://github.com/yourusername/simple-product-export
 Description: 导出/导入 产品、页面、文章 和分类 CSV，包含所有自定义字段，支持筛选导出
-Version: 4.3.1
+Version: 4.7.0
 Author: zhangkun
 License: GPL v2 or later
 */
@@ -14,7 +14,8 @@ if (!defined('ABSPATH')) {
 
 add_action('admin_menu', 'spe_add_admin_menu');
 
-function spe_add_admin_menu() {
+function spe_add_admin_menu()
+{
     add_menu_page(
         '内容导入导出',
         '导入导出工具',
@@ -26,12 +27,14 @@ function spe_add_admin_menu() {
     );
 }
 
-function spe_admin_page() {
+function spe_admin_page()
+{
     if (isset($_GET['spe_action']) && $_GET['spe_action'] === 'export_products') {
         spe_export_products();
     }
-    if (isset($_GET['spe_action']) && $_GET['spe_action'] === 'export_categories') {
-        spe_export_categories();
+    if (isset($_GET['spe_action']) && $_GET['spe_action'] === 'export_taxonomies') {
+        $taxonomy = isset($_GET['spe_taxonomy']) ? sanitize_text_field($_GET['spe_taxonomy']) : 'product_cat';
+        spe_export_taxonomies($taxonomy);
     }
     if (isset($_GET['spe_action']) && $_GET['spe_action'] === 'export_pages') {
         spe_export_pages();
@@ -43,8 +46,9 @@ function spe_admin_page() {
     if (isset($_POST['spe_import_products']) && wp_verify_nonce($_POST['spe_import_products'], 'spe_import')) {
         $result = spe_import_products();
     }
-    if (isset($_POST['spe_import_categories']) && wp_verify_nonce($_POST['spe_import_categories'], 'spe_import_cat')) {
-        $result = spe_import_categories();
+    if (isset($_POST['spe_import_taxonomies']) && wp_verify_nonce($_POST['spe_import_taxonomies'], 'spe_import_tax')) {
+        $taxonomy = isset($_POST['spe_taxonomy']) ? sanitize_text_field($_POST['spe_taxonomy']) : 'product_cat';
+        $result = spe_import_taxonomies($taxonomy);
     }
     if (isset($_POST['spe_import_pages']) && wp_verify_nonce($_POST['spe_import_pages'], 'spe_import_pages')) {
         $result = spe_import_pages();
@@ -64,7 +68,8 @@ function spe_admin_page() {
             <?php if (!empty($result['debug'])): ?>
                 <div class="notice notice-info is-dismissible" style="margin-top: 10px;">
                     <p><strong>📋 调试信息：</strong></p>
-                    <pre style="background: #f5f5f5; padding: 10px; border: 1px solid #ddd; max-height: 300px; overflow-y: auto; font-size: 12px; margin: 10px 0;"><?php echo esc_html($result['debug']); ?></pre>
+                    <pre
+                        style="background: #f5f5f5; padding: 10px; border: 1px solid #ddd; max-height: 300px; overflow-y: auto; font-size: 12px; margin: 10px 0;"><?php echo esc_html($result['debug']); ?></pre>
                 </div>
             <?php endif; ?>
         <?php endif; ?>
@@ -84,11 +89,13 @@ function spe_admin_page() {
                     <input type="hidden" name="page" value="content-import-export">
                     <input type="hidden" name="spe_action" value="export_products">
 
-                    <button type="button" class="button" onclick="var panel=document.getElementById('product-filter-panel');var btn=this;if(panel.style.display==='none'){panel.style.display='block';btn.textContent='收起筛选选项';}else{panel.style.display='none';btn.textContent='展开筛选选项';}">
+                    <button type="button" class="button"
+                        onclick="var panel=document.getElementById('product-filter-panel');var btn=this;if(panel.style.display==='none'){panel.style.display='block';btn.textContent='收起筛选选项';}else{panel.style.display='none';btn.textContent='展开筛选选项';}">
                         展开筛选选项
                     </button>
 
-                    <div id="product-filter-panel" style="display:none; margin-top: 15px; padding: 15px; background: #f7f7f7; border: 1px solid #ddd; border-radius: 4px;">
+                    <div id="product-filter-panel"
+                        style="display:none; margin-top: 15px; padding: 15px; background: #f7f7f7; border: 1px solid #ddd; border-radius: 4px;">
                         <p style="margin-top:0;"><strong>分类筛选：</strong></p>
                         <select name="spe_categories[]" multiple size="5" style="width: 100%; margin-bottom: 10px;">
                             <?php
@@ -101,7 +108,8 @@ function spe_admin_page() {
                         <p style="font-size: 12px; color: #666; margin: 0 0 15px 0;">按住 Ctrl/Cmd 可多选</p>
 
                         <p><strong>关键词搜索：</strong></p>
-                        <input type="text" name="spe_keyword" placeholder="搜索标题或内容..." style="width: 100%; margin-bottom: 5px;">
+                        <input type="text" name="spe_keyword" placeholder="搜索标题或内容..."
+                            style="width: 100%; margin-bottom: 5px;">
 
                         <select name="spe_keyword_scope" style="width: 100%; margin-bottom: 10px;">
                             <option value="all">搜索范围：全部（标题+内容）</option>
@@ -109,7 +117,8 @@ function spe_admin_page() {
                             <option value="content">搜索范围：仅内容</option>
                         </select>
 
-                        <button type="button" class="button" onclick="document.querySelector('#export-products-form select[name=\'spe_categories[]\']').selectedIndex=-1;document.querySelector('#export-products-form input[name=\'spe_keyword\']').value='';">
+                        <button type="button" class="button"
+                            onclick="document.querySelector('#export-products-form select[name=\'spe_categories[]\']').selectedIndex=-1;document.querySelector('#export-products-form input[name=\'spe_keyword\']').value='';">
                             重置筛选
                         </button>
                     </div>
@@ -146,7 +155,7 @@ function spe_admin_page() {
                     <li>✅ 所有 ACF/自定义字段</li>
                 </ul>
                 <a href="<?php echo admin_url('admin.php?page=content-import-export&spe_action=export_pages'); ?>"
-                   class="button button-primary button-large">
+                    class="button button-primary button-large">
                     下载页面 CSV
                 </a>
             </div>
@@ -178,11 +187,13 @@ function spe_admin_page() {
                     <input type="hidden" name="page" value="content-import-export">
                     <input type="hidden" name="spe_action" value="export_posts">
 
-                    <button type="button" class="button" onclick="var panel=document.getElementById('posts-filter-panel');var btn=this;if(panel.style.display==='none'){panel.style.display='block';btn.textContent='收起筛选选项';}else{panel.style.display='none';btn.textContent='展开筛选选项';}">
+                    <button type="button" class="button"
+                        onclick="var panel=document.getElementById('posts-filter-panel');var btn=this;if(panel.style.display==='none'){panel.style.display='block';btn.textContent='收起筛选选项';}else{panel.style.display='none';btn.textContent='展开筛选选项';}">
                         展开筛选选项
                     </button>
 
-                    <div id="posts-filter-panel" style="display:none; margin-top: 15px; padding: 15px; background: #f7f7f7; border: 1px solid #ddd; border-radius: 4px;">
+                    <div id="posts-filter-panel"
+                        style="display:none; margin-top: 15px; padding: 15px; background: #f7f7f7; border: 1px solid #ddd; border-radius: 4px;">
                         <p style="margin-top:0;"><strong>分类筛选：</strong></p>
                         <select name="spe_categories[]" multiple size="5" style="width: 100%; margin-bottom: 10px;">
                             <?php
@@ -195,7 +206,8 @@ function spe_admin_page() {
                         <p style="font-size: 12px; color: #666; margin: 0 0 15px 0;">按住 Ctrl/Cmd 可多选</p>
 
                         <p><strong>关键词搜索：</strong></p>
-                        <input type="text" name="spe_keyword" placeholder="搜索标题或内容..." style="width: 100%; margin-bottom: 5px;">
+                        <input type="text" name="spe_keyword" placeholder="搜索标题或内容..."
+                            style="width: 100%; margin-bottom: 5px;">
 
                         <select name="spe_keyword_scope" style="width: 100%; margin-bottom: 10px;">
                             <option value="all">搜索范围：全部（标题+内容）</option>
@@ -203,7 +215,8 @@ function spe_admin_page() {
                             <option value="content">搜索范围：仅内容</option>
                         </select>
 
-                        <button type="button" class="button" onclick="document.querySelector('#export-posts-form select[name=\'spe_categories[]\']').selectedIndex=-1;document.querySelector('#export-posts-form input[name=\'spe_keyword\']').value='';">
+                        <button type="button" class="button"
+                            onclick="document.querySelector('#export-posts-form select[name=\'spe_categories[]\']').selectedIndex=-1;document.querySelector('#export-posts-form input[name=\'spe_keyword\']').value='';">
                             重置筛选
                         </button>
                     </div>
@@ -228,21 +241,47 @@ function spe_admin_page() {
             </div>
         </div>
 
-        <h2 style="margin-top: 30px;">📂 产品分类</h2>
+        <h2 style="margin-top: 30px;">📂 分类/自定义分类法 (Taxonomies)</h2>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 10px;">
             <div class="card">
                 <h2>📤 分类导出</h2>
-                <a href="<?php echo admin_url('admin.php?page=content-import-export&spe_action=export_categories'); ?>"
-                   class="button button-primary button-large">
-                    下载分类 CSV
-                </a>
+                <form method="get" action="<?php echo admin_url('admin.php'); ?>">
+                    <input type="hidden" name="page" value="content-import-export">
+                    <input type="hidden" name="spe_action" value="export_taxonomies">
+
+                    <p>选择要导出的分类法：</p>
+                    <select name="spe_taxonomy" style="width: 100%; margin-bottom: 10px;">
+                        <?php
+                        $taxonomies = get_taxonomies(['public' => true], 'objects');
+                        foreach ($taxonomies as $tax) {
+                            $selected = ($tax->name === 'product_cat') ? 'selected' : '';
+                            echo '<option value="' . esc_attr($tax->name) . '" ' . $selected . '>' . esc_html($tax->label) . ' (' . $tax->name . ')</option>';
+                        }
+                        ?>
+                    </select>
+
+                    <button type="submit" class="button button-primary button-large">
+                        下载分类 CSV
+                    </button>
+                </form>
             </div>
 
             <div class="card">
                 <h2>📥 分类导入</h2>
                 <form method="post" enctype="multipart/form-data">
-                    <?php wp_nonce_field('spe_import_cat', 'spe_import_categories'); ?>
-                    <input type="file" name="spe_import_cat_file" accept=".csv" required>
+                    <?php wp_nonce_field('spe_import_tax', 'spe_import_taxonomies'); ?>
+
+                    <p>选择要导入的目标分类法：</p>
+                    <select name="spe_taxonomy" style="width: 100%; margin-bottom: 10px;">
+                        <?php
+                        foreach ($taxonomies as $tax) {
+                            $selected = ($tax->name === 'product_cat') ? 'selected' : '';
+                            echo '<option value="' . esc_attr($tax->name) . '" ' . $selected . '>' . esc_html($tax->label) . ' (' . $tax->name . ')</option>';
+                        }
+                        ?>
+                    </select>
+
+                    <input type="file" name="spe_import_taxonomy_file" accept=".csv" required>
                     <button type="submit" class="button button-secondary" style="margin-top: 10px;">
                         上传分类 CSV
                     </button>
@@ -267,11 +306,13 @@ function spe_admin_page() {
 /**
  * 导出产品
  */
-function spe_export_products() {
-    if (!current_user_can('manage_options')) wp_die('没有权限');
+function spe_export_products()
+{
+    if (!current_user_can('manage_options'))
+        wp_die('没有权限');
 
     // 获取筛选参数
-    $filter_categories = isset($_GET['spe_categories']) ? array_map('intval', (array)$_GET['spe_categories']) : [];
+    $filter_categories = isset($_GET['spe_categories']) ? array_map('intval', (array) $_GET['spe_categories']) : [];
     $filter_keyword = isset($_GET['spe_keyword']) ? sanitize_text_field($_GET['spe_keyword']) : '';
     $filter_keyword_scope = isset($_GET['spe_keyword_scope']) ? sanitize_text_field($_GET['spe_keyword_scope']) : 'all';
 
@@ -284,7 +325,8 @@ function spe_export_products() {
         $suffix .= '-search';
     }
 
-    while (ob_get_level()) ob_end_clean();
+    while (ob_get_level())
+        ob_end_clean();
     set_time_limit(0);
 
     $filename = 'products-export' . $suffix . '-' . date('Y-m-d-His') . '.csv';
@@ -362,13 +404,13 @@ function spe_export_products() {
         fclose($output);
         exit;
     }
-    
+
     if (empty($products)) {
         fputcsv($output, ['ID', '标题', 'Slug', '短描述', '长描述']);
         fclose($output);
         exit;
     }
-    
+
     // 扫描第一个产品获取所有 meta keys
     $first_id = $products[0]->ID;
     $all_meta_keys = $wpdb->get_col($wpdb->prepare(
@@ -378,20 +420,47 @@ function spe_export_products() {
         ORDER BY meta_key",
         $first_id
     ));
-    
+
     // 排除 WordPress 内部字段
     $exclude_keys = [
-        '_edit_lock', '_edit_last', '_wp_old_slug', '_wp_trash_meta_status', '_wp_trash_meta_time',
-        '_thumbnail_id', '_product_image_gallery', '_product_version', '_wp_page_template',
-        '_stock', '_stock_status', '_manage_stock', '_backorders', '_sold_individually',
-        '_regular_price', '_sale_price', '_price', '_wc_average_rating', '_wc_review_count',
-        '_product_attributes', '_default_attributes', '_variation_description', '_sku',
-        '_downloadable_files', '_download_limit', '_download_expiry', '_purchase_note',
-        '_virtual', '_downloadable', '_weight', '_length', '_width', '_height',
-        '_children', '_featured',
+        '_edit_lock',
+        '_edit_last',
+        '_wp_old_slug',
+        '_wp_trash_meta_status',
+        '_wp_trash_meta_time',
+        '_thumbnail_id',
+        '_product_image_gallery',
+        '_product_version',
+        '_wp_page_template',
+        '_stock',
+        '_stock_status',
+        '_manage_stock',
+        '_backorders',
+        '_sold_individually',
+        '_regular_price',
+        '_sale_price',
+        '_price',
+        '_wc_average_rating',
+        '_wc_review_count',
+        '_product_attributes',
+        '_default_attributes',
+        '_variation_description',
+        '_sku',
+        '_downloadable_files',
+        '_download_limit',
+        '_download_expiry',
+        '_purchase_note',
+        '_virtual',
+        '_downloadable',
+        '_weight',
+        '_length',
+        '_width',
+        '_height',
+        '_children',
+        '_featured',
         'total_sales'
     ];
-    
+
     $custom_fields = array_values(array_diff($all_meta_keys, $exclude_keys));
     sort($custom_fields);
 
@@ -411,7 +480,8 @@ function spe_export_products() {
     $attachment_fields = [];
     foreach ($products as $p) {
         foreach ($custom_fields as $field) {
-            if (in_array($field, $attachment_fields)) continue;
+            if (in_array($field, $attachment_fields))
+                continue;
             $value = get_post_meta($p->ID, $field, true);
             if (is_numeric($value) && $value > 0 && wp_get_attachment_url($value)) {
                 $attachment_fields[] = $field;
@@ -427,19 +497,19 @@ function spe_export_products() {
     }
 
     fputcsv($output, $header);
-    
+
     // 数据行
     foreach ($products as $p) {
         $id = $p->ID;
-        
+
         // 短描述和长描述
         $short_desc = $p->post_excerpt ?: '';
         $long_desc = $p->post_content ?: '';
-        
+
         // 清理换行
         $short_desc = str_replace(["\r\n", "\n", "\r"], ' ', $short_desc);
         $long_desc = str_replace(["\r\n", "\n", "\r"], ' ', $long_desc);
-        
+
         // AIOSEO
         $meta_title = '';
         $meta_desc = '';
@@ -465,9 +535,9 @@ function spe_export_products() {
         if (empty($meta_desc)) {
             $meta_desc = get_post_meta($id, '_aioseop_description', true);
         }
-        
+
         $row = [$id, $p->post_title, $p->post_name, $short_desc, $long_desc, $meta_title, $meta_desc];
-        
+
         // 自定义字段值
         foreach ($custom_fields as $field) {
             $value = get_post_meta($id, $field, true);
@@ -506,47 +576,50 @@ function spe_export_products() {
                 }
             }
         }
-        
+
         fputcsv($output, $row);
     }
-    
+
     fclose($output);
     exit;
 }
 
 /**
- * 导出分类
+ * 导出分类（支持自定义分类法）
  */
-function spe_export_categories() {
-    if (!current_user_can('manage_options')) wp_die('没有权限');
-    
-    while (ob_get_level()) ob_end_clean();
+function spe_export_taxonomies($taxonomy = 'product_cat')
+{
+    if (!current_user_can('manage_options'))
+        wp_die('没有权限');
+
+    while (ob_get_level())
+        ob_end_clean();
     set_time_limit(0);
-    
-    $filename = 'product-categories-export-' . date('Y-m-d-His') . '.csv';
+
+    $filename = $taxonomy . '-export-' . date('Y-m-d-His') . '.csv';
     header('Content-Type: text/csv; charset=utf-8');
     header('Content-Disposition: attachment; filename="' . $filename . '"');
-    
+
     $output = fopen('php://output', 'w');
     fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF));
-    
+
     global $wpdb;
-    
+
     // 获取所有分类
-    $categories = $wpdb->get_results("
+    $categories = $wpdb->get_results($wpdb->prepare("
         SELECT t.term_id, t.name, t.slug, tt.description, tt.parent
         FROM {$wpdb->terms} t
         INNER JOIN {$wpdb->term_taxonomy} tt ON t.term_id = tt.term_id
-        WHERE tt.taxonomy = 'product_cat'
+        WHERE tt.taxonomy = %s
         ORDER BY t.term_id
-    ");
-    
+    ", $taxonomy));
+
     if (empty($categories)) {
         fputcsv($output, ['ID', '标题', 'Slug', '描述', '父分类 ID', 'Meta Title', 'Meta Description']);
         fclose($output);
         exit;
     }
-    
+
     // 扫描第一个分类的 meta
     $first_id = $categories[0]->term_id;
     $all_meta_keys = $wpdb->get_col($wpdb->prepare(
@@ -556,7 +629,7 @@ function spe_export_categories() {
         ORDER BY meta_key",
         $first_id
     ));
-    
+
     $exclude_keys = ['_product_count', '_thumbnail_id'];
     $custom_fields = array_values(array_diff($all_meta_keys, $exclude_keys));
     sort($custom_fields);
@@ -575,7 +648,8 @@ function spe_export_categories() {
     $attachment_fields = [];
     foreach ($categories as $cat) {
         foreach ($custom_fields as $field) {
-            if (in_array($field, $attachment_fields)) continue;
+            if (in_array($field, $attachment_fields))
+                continue;
             $value = get_term_meta($cat->term_id, $field, true);
             if (is_numeric($value) && $value > 0 && wp_get_attachment_url($value)) {
                 $attachment_fields[] = $field;
@@ -591,7 +665,7 @@ function spe_export_categories() {
     }
 
     fputcsv($output, $header);
-    
+
     foreach ($categories as $cat) {
         $id = $cat->term_id;
 
@@ -630,7 +704,7 @@ function spe_export_categories() {
             $meta_title,
             $meta_desc
         ];
-        
+
         foreach ($custom_fields as $field) {
             $value = get_term_meta($cat->term_id, $field, true);
             if (is_array($value)) {
@@ -653,10 +727,10 @@ function spe_export_categories() {
                 }
             }
         }
-        
+
         fputcsv($output, $row);
     }
-    
+
     fclose($output);
     exit;
 }
@@ -664,49 +738,62 @@ function spe_export_categories() {
 /**
  * 导入产品
  */
-function spe_import_products() {
+function spe_import_products()
+{
     if (empty($_FILES['spe_import_file']['tmp_name'])) {
         return ['error' => true, 'message' => '请选择 CSV 文件'];
     }
-    
+
     $file = $_FILES['spe_import_file']['tmp_name'];
     $handle = fopen($file, 'r');
-    if (!$handle) return ['error' => true, 'message' => '无法读取文件'];
-    
+    if (!$handle)
+        return ['error' => true, 'message' => '无法读取文件'];
+
     $header = fgetcsv($handle);
     if (!$header) {
         fclose($handle);
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
-    
+
     $id_col = array_search('ID', $header);
     $title_col = array_search('标题', $header);
+    if ($title_col === false)
+        $title_col = array_search('Title', $header);
+
     $slug_col = array_search('Slug', $header);
+
     $short_desc_col = array_search('短描述', $header);
+    if ($short_desc_col === false)
+        $short_desc_col = array_search('Short Description', $header);
+
     $long_desc_col = array_search('长描述', $header);
+    if ($long_desc_col === false)
+        $long_desc_col = array_search('Long Description', $header);
     $meta_title_col = array_search('Meta Title', $header);
     $meta_desc_col = array_search('Meta Description', $header);
-    
+
     $custom_cols = [];
     foreach ($header as $idx => $col_name) {
-        if (!in_array($col_name, ['ID', '标题', 'Slug', '短描述', '长描述', 'Meta Title', 'Meta Description'])) {
+        // 排除所有已知的标准列（中英文）
+        if (!in_array($col_name, ['ID', '标题', 'Title', 'Slug', '短描述', 'Short Description', '长描述', 'Long Description', 'Meta Title', 'Meta Description'])) {
             $custom_cols[$idx] = $col_name;
         }
     }
-    
+
     $updated = 0;
     $not_found = 0;
-    
+
     while (($row = fgetcsv($handle)) !== false) {
-        $product_id = !empty($id_col) ? intval($row[$id_col]) : 0;
-        if (!$product_id) continue;
-        
+        $product_id = ($id_col !== false) ? intval($row[$id_col]) : 0;
+        if (!$product_id)
+            continue;
+
         $product = wc_get_product($product_id);
         if (!$product) {
             $not_found++;
             continue;
         }
-        
+
         // 更新基础字段
         $update_data = [];
         if ($title_col !== false && !empty($row[$title_col])) {
@@ -721,21 +808,81 @@ function spe_import_products() {
         if ($long_desc_col !== false) {
             $update_data['post_content'] = $row[$long_desc_col];
         }
-        
+
         if (!empty($update_data)) {
             $update_data['ID'] = $product_id;
             wp_update_post($update_data);
         }
-        
-        // AIOSEO
+
+        // AIOSEO - 支持多种存储方式
         if ($meta_title_col !== false && $row[$meta_title_col] !== '') {
-            update_post_meta($product_id, '_aioseo_title', ['title' => $row[$meta_title_col]]);
+            $meta_title = $row[$meta_title_col];
+
+            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
+            global $wpdb;
+            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
+                $existing = $wpdb->get_row($wpdb->prepare(
+                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
+                    $product_id
+                ));
+
+                if ($existing) {
+                    $wpdb->update(
+                        $aioseo_table,
+                        ['title' => $meta_title],
+                        ['post_id' => $product_id],
+                        ['%s'],
+                        ['%d']
+                    );
+                } else {
+                    $wpdb->insert(
+                        $aioseo_table,
+                        ['post_id' => $product_id, 'title' => $meta_title],
+                        ['%d', '%s']
+                    );
+                }
+            }
+
+            // 方式2: postmeta (兼容其他版本)
+            update_post_meta($product_id, '_aioseo_title', $meta_title);
+            update_post_meta($product_id, '_aioseop_title', $meta_title);
         }
-        
+
         if ($meta_desc_col !== false && $row[$meta_desc_col] !== '') {
-            update_post_meta($product_id, '_aioseo_description', $row[$meta_desc_col]);
+            $meta_desc = $row[$meta_desc_col];
+
+            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
+            global $wpdb;
+            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
+                $existing = $wpdb->get_row($wpdb->prepare(
+                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
+                    $product_id
+                ));
+
+                if ($existing) {
+                    $wpdb->update(
+                        $aioseo_table,
+                        ['description' => $meta_desc],
+                        ['post_id' => $product_id],
+                        ['%s'],
+                        ['%d']
+                    );
+                } else {
+                    $wpdb->insert(
+                        $aioseo_table,
+                        ['post_id' => $product_id, 'description' => $meta_desc],
+                        ['%d', '%s']
+                    );
+                }
+            }
+
+            // 方式2: postmeta (兼容其他版本)
+            update_post_meta($product_id, '_aioseo_description', $meta_desc);
+            update_post_meta($product_id, '_aioseop_description', $meta_desc);
         }
-        
+
         // 自定义字段
         foreach ($custom_cols as $idx => $field_name) {
             $value = $row[$idx] ?? '';
@@ -747,28 +894,31 @@ function spe_import_products() {
                 update_post_meta($product_id, $field_name, $value);
             }
         }
-        
+
         $updated++;
     }
-    
+
     fclose($handle);
 
     $msg = "产品导入完成！更新了 {$updated} 个产品";
-    if ($not_found > 0) $msg .= "，{$not_found} 个 ID 未找到";
+    if ($not_found > 0)
+        $msg .= "，{$not_found} 个 ID 未找到";
     return ['error' => false, 'message' => $msg, 'debug' => ''];
 }
 
 /**
- * 导入分类
+ * 导入分类（支持自定义分类法）
  */
-function spe_import_categories() {
-    if (empty($_FILES['spe_import_cat_file']['tmp_name'])) {
+function spe_import_taxonomies($taxonomy = 'product_cat')
+{
+    if (empty($_FILES['spe_import_taxonomy_file']['tmp_name'])) {
         return ['error' => true, 'message' => '请选择 CSV 文件'];
     }
 
-    $file = $_FILES['spe_import_cat_file']['tmp_name'];
+    $file = $_FILES['spe_import_taxonomy_file']['tmp_name'];
     $handle = fopen($file, 'r');
-    if (!$handle) return ['error' => true, 'message' => '无法读取文件'];
+    if (!$handle)
+        return ['error' => true, 'message' => '无法读取文件'];
 
     $header = fgetcsv($handle);
     if (!$header) {
@@ -790,12 +940,15 @@ function spe_import_categories() {
 
     // 匹配名称列（支持多种格式）
     $name_col = array_search('标题', $header);
-    if ($name_col === false) $name_col = array_search('名称', $header);
-    if ($name_col === false) $name_col = array_search('name', $header_lower);
+    if ($name_col === false)
+        $name_col = array_search('名称', $header);
+    if ($name_col === false)
+        $name_col = array_search('name', $header_lower);
 
     // 匹配slug列
     $slug_col = array_search('Slug', $header);
-    if ($slug_col === false) $slug_col = array_search('slug', $header_lower);
+    if ($slug_col === false)
+        $slug_col = array_search('slug', $header_lower);
 
     // 匹配描述列（AIOSEO用description作为SEO描述，不是分类描述）
     $desc_col = array_search('描述', $header);
@@ -806,15 +959,18 @@ function spe_import_categories() {
 
     // 匹配父分类ID列
     $parent_col = array_search('父分类 ID', $header);
-    if ($parent_col === false) $parent_col = array_search('parent', $header_lower);
+    if ($parent_col === false)
+        $parent_col = array_search('parent', $header_lower);
 
     // 匹配SEO标题列（AIOSEO用title列）
     $meta_title_col = array_search('Meta Title', $header);
-    if ($meta_title_col === false) $meta_title_col = array_search('title', $header_lower);
+    if ($meta_title_col === false)
+        $meta_title_col = array_search('title', $header_lower);
 
     // 匹配SEO描述列（AIOSEO用description列）
     $meta_desc_col = array_search('Meta Description', $header);
-    if ($meta_desc_col === false) $meta_desc_col = array_search('description', $header_lower);
+    if ($meta_desc_col === false)
+        $meta_desc_col = array_search('description', $header_lower);
 
     $custom_cols = [];
     foreach ($header as $idx => $col_name) {
@@ -881,7 +1037,7 @@ function spe_import_categories() {
             continue;
         }
 
-        $cat = get_term($cat_id, 'product_cat');
+        $cat = get_term($cat_id, $taxonomy);
         if (!$cat || is_wp_error($cat)) {
             $debug_log .= "跳过: ID $cat_id 未找到\n";
             $not_found++;
@@ -938,7 +1094,7 @@ function spe_import_categories() {
         }
 
         if (!empty($update_data)) {
-            $result = wp_update_term($cat_id, 'product_cat', $update_data);
+            $result = wp_update_term($cat_id, $taxonomy, $update_data);
             if (is_wp_error($result)) {
                 $error_msg = "ID $cat_id: " . $result->get_error_message();
                 $errors[] = $error_msg;
@@ -956,7 +1112,7 @@ function spe_import_categories() {
         // 父分类单独处理
         if ($parent_col !== false && isset($row[$parent_col])) {
             $parent_id = !empty($row[$parent_col]) ? intval($row[$parent_col]) : 0;
-            wp_update_term($cat_id, 'product_cat', ['parent' => $parent_id]);
+            wp_update_term($cat_id, $taxonomy, ['parent' => $parent_id]);
             $debug_log .= "  父分类设置为: $parent_id\n";
         }
 
@@ -1047,12 +1203,16 @@ function spe_import_categories() {
 
     // 构建详细消息
     $msg = "分类导入完成！共处理 {$processed} 个分类";
-    if ($updated > 0) $msg .= "（其中 {$updated} 个有更新）";
-    if ($no_changes > 0) $msg .= "，{$no_changes} 个无变化";
-    if ($not_found > 0) $msg .= "，{$not_found} 个 ID 未找到";
+    if ($updated > 0)
+        $msg .= "（其中 {$updated} 个有更新）";
+    if ($no_changes > 0)
+        $msg .= "，{$no_changes} 个无变化";
+    if ($not_found > 0)
+        $msg .= "，{$not_found} 个 ID 未找到";
     if (!empty($errors)) {
         $msg .= "。错误: " . implode('; ', array_slice($errors, 0, 3));
-        if (count($errors) > 3) $msg .= " 等";
+        if (count($errors) > 3)
+            $msg .= " 等";
     }
     $msg .= "。已刷新 permalink 结构。";
 
@@ -1063,10 +1223,13 @@ function spe_import_categories() {
 /**
  * 导出页面
  */
-function spe_export_pages() {
-    if (!current_user_can('manage_options')) wp_die('没有权限');
+function spe_export_pages()
+{
+    if (!current_user_can('manage_options'))
+        wp_die('没有权限');
 
-    while (ob_get_level()) ob_end_clean();
+    while (ob_get_level())
+        ob_end_clean();
     set_time_limit(0);
 
     $filename = 'pages-export-' . date('Y-m-d-His') . '.csv';
@@ -1105,8 +1268,13 @@ function spe_export_pages() {
 
     // 排除 WordPress 内部字段
     $exclude_keys = [
-        '_edit_lock', '_edit_last', '_wp_old_slug', '_wp_trash_meta_status', '_wp_trash_meta_time',
-        '_thumbnail_id', '_wp_page_template',
+        '_edit_lock',
+        '_edit_last',
+        '_wp_old_slug',
+        '_wp_trash_meta_status',
+        '_wp_trash_meta_time',
+        '_thumbnail_id',
+        '_wp_page_template',
     ];
 
     $custom_fields = array_values(array_diff($all_meta_keys, $exclude_keys));
@@ -1128,7 +1296,8 @@ function spe_export_pages() {
     $attachment_fields = [];
     foreach ($pages as $p) {
         foreach ($custom_fields as $field) {
-            if (in_array($field, $attachment_fields)) continue;
+            if (in_array($field, $attachment_fields))
+                continue;
             $value = get_post_meta($p->ID, $field, true);
             if (is_numeric($value) && $value > 0 && wp_get_attachment_url($value)) {
                 $attachment_fields[] = $field;
@@ -1234,11 +1403,13 @@ function spe_export_pages() {
 /**
  * 导出文章
  */
-function spe_export_posts() {
-    if (!current_user_can('manage_options')) wp_die('没有权限');
+function spe_export_posts()
+{
+    if (!current_user_can('manage_options'))
+        wp_die('没有权限');
 
     // 获取筛选参数
-    $filter_categories = isset($_GET['spe_categories']) ? array_map('intval', (array)$_GET['spe_categories']) : [];
+    $filter_categories = isset($_GET['spe_categories']) ? array_map('intval', (array) $_GET['spe_categories']) : [];
     $filter_keyword = isset($_GET['spe_keyword']) ? sanitize_text_field($_GET['spe_keyword']) : '';
     $filter_keyword_scope = isset($_GET['spe_keyword_scope']) ? sanitize_text_field($_GET['spe_keyword_scope']) : 'all';
 
@@ -1251,7 +1422,8 @@ function spe_export_posts() {
         $suffix .= '-search';
     }
 
-    while (ob_get_level()) ob_end_clean();
+    while (ob_get_level())
+        ob_end_clean();
     set_time_limit(0);
 
     $filename = 'posts-export' . $suffix . '-' . date('Y-m-d-His') . '.csv';
@@ -1342,8 +1514,13 @@ function spe_export_posts() {
 
     // 排除 WordPress 内部字段
     $exclude_keys = [
-        '_edit_lock', '_edit_last', '_wp_old_slug', '_wp_trash_meta_status', '_wp_trash_meta_time',
-        '_thumbnail_id', '_wp_page_template',
+        '_edit_lock',
+        '_edit_last',
+        '_wp_old_slug',
+        '_wp_trash_meta_status',
+        '_wp_trash_meta_time',
+        '_thumbnail_id',
+        '_wp_page_template',
     ];
 
     $custom_fields = array_values(array_diff($all_meta_keys, $exclude_keys));
@@ -1365,7 +1542,8 @@ function spe_export_posts() {
     $attachment_fields = [];
     foreach ($posts as $p) {
         foreach ($custom_fields as $field) {
-            if (in_array($field, $attachment_fields)) continue;
+            if (in_array($field, $attachment_fields))
+                continue;
             $value = get_post_meta($p->ID, $field, true);
             if (is_numeric($value) && $value > 0 && wp_get_attachment_url($value)) {
                 $attachment_fields[] = $field;
@@ -1471,14 +1649,16 @@ function spe_export_posts() {
 /**
  * 导入页面
  */
-function spe_import_pages() {
+function spe_import_pages()
+{
     if (empty($_FILES['spe_import_pages_file']['tmp_name'])) {
         return ['error' => true, 'message' => '请选择 CSV 文件'];
     }
 
     $file = $_FILES['spe_import_pages_file']['tmp_name'];
     $handle = fopen($file, 'r');
-    if (!$handle) return ['error' => true, 'message' => '无法读取文件'];
+    if (!$handle)
+        return ['error' => true, 'message' => '无法读取文件'];
 
     $header = fgetcsv($handle);
     if (!$header) {
@@ -1486,17 +1666,30 @@ function spe_import_pages() {
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
 
+    // 支持中英文列名
     $id_col = array_search('ID', $header);
+
     $title_col = array_search('标题', $header);
+    if ($title_col === false)
+        $title_col = array_search('Title', $header);
+
     $slug_col = array_search('Slug', $header);
+
     $excerpt_col = array_search('摘要', $header);
+    if ($excerpt_col === false)
+        $excerpt_col = array_search('Excerpt', $header);
+
     $content_col = array_search('内容', $header);
+    if ($content_col === false)
+        $content_col = array_search('Content', $header);
+
     $meta_title_col = array_search('Meta Title', $header);
     $meta_desc_col = array_search('Meta Description', $header);
 
     $custom_cols = [];
     foreach ($header as $idx => $col_name) {
-        if (!in_array($col_name, ['ID', '标题', 'Slug', '摘要', '内容', 'Meta Title', 'Meta Description'])) {
+        // 排除所有已知的标准列（中英文）
+        if (!in_array($col_name, ['ID', '标题', 'Title', 'Slug', '摘要', 'Excerpt', '内容', 'Content', 'Meta Title', 'Meta Description'])) {
             // 跳过 _url 结尾的列
             if (substr($col_name, -4) !== '_url') {
                 $custom_cols[$idx] = $col_name;
@@ -1508,8 +1701,9 @@ function spe_import_pages() {
     $not_found = 0;
 
     while (($row = fgetcsv($handle)) !== false) {
-        $page_id = !empty($id_col) ? intval($row[$id_col]) : 0;
-        if (!$page_id) continue;
+        $page_id = ($id_col !== false) ? intval($row[$id_col]) : 0;
+        if (!$page_id)
+            continue;
 
         // 检查是否是页面
         $post = get_post($page_id);
@@ -1538,13 +1732,51 @@ function spe_import_pages() {
             wp_update_post($update_data);
         }
 
-        // AIOSEO
+        // AIOSEO - 支持多种存储方式
         if ($meta_title_col !== false && $row[$meta_title_col] !== '') {
-            update_post_meta($page_id, '_aioseo_title', ['title' => $row[$meta_title_col]]);
+            $meta_title = $row[$meta_title_col];
+
+            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
+            global $wpdb;
+            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
+                $existing = $wpdb->get_row($wpdb->prepare(
+                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
+                    $page_id
+                ));
+                if ($existing) {
+                    $wpdb->update($aioseo_table, ['title' => $meta_title], ['post_id' => $page_id], ['%s'], ['%d']);
+                } else {
+                    $wpdb->insert($aioseo_table, ['post_id' => $page_id, 'title' => $meta_title], ['%d', '%s']);
+                }
+            }
+
+            // 方式2: postmeta (兼容其他版本)
+            update_post_meta($page_id, '_aioseo_title', $meta_title);
+            update_post_meta($page_id, '_aioseop_title', $meta_title);
         }
 
         if ($meta_desc_col !== false && $row[$meta_desc_col] !== '') {
-            update_post_meta($page_id, '_aioseo_description', $row[$meta_desc_col]);
+            $meta_desc = $row[$meta_desc_col];
+
+            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
+            global $wpdb;
+            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
+                $existing = $wpdb->get_row($wpdb->prepare(
+                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
+                    $page_id
+                ));
+                if ($existing) {
+                    $wpdb->update($aioseo_table, ['description' => $meta_desc], ['post_id' => $page_id], ['%s'], ['%d']);
+                } else {
+                    $wpdb->insert($aioseo_table, ['post_id' => $page_id, 'description' => $meta_desc], ['%d', '%s']);
+                }
+            }
+
+            // 方式2: postmeta (兼容其他版本)
+            update_post_meta($page_id, '_aioseo_description', $meta_desc);
+            update_post_meta($page_id, '_aioseop_description', $meta_desc);
         }
 
         // 自定义字段
@@ -1565,21 +1797,24 @@ function spe_import_pages() {
     fclose($handle);
 
     $msg = "页面导入完成！更新了 {$updated} 个页面";
-    if ($not_found > 0) $msg .= "，{$not_found} 个 ID 未找到或不是页面类型";
+    if ($not_found > 0)
+        $msg .= "，{$not_found} 个 ID 未找到或不是页面类型";
     return ['error' => false, 'message' => $msg, 'debug' => ''];
 }
 
 /**
  * 导入文章
  */
-function spe_import_posts() {
+function spe_import_posts()
+{
     if (empty($_FILES['spe_import_posts_file']['tmp_name'])) {
         return ['error' => true, 'message' => '请选择 CSV 文件'];
     }
 
     $file = $_FILES['spe_import_posts_file']['tmp_name'];
     $handle = fopen($file, 'r');
-    if (!$handle) return ['error' => true, 'message' => '无法读取文件'];
+    if (!$handle)
+        return ['error' => true, 'message' => '无法读取文件'];
 
     $header = fgetcsv($handle);
     if (!$header) {
@@ -1587,17 +1822,30 @@ function spe_import_posts() {
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
 
+    // 支持中英文列名
     $id_col = array_search('ID', $header);
+
     $title_col = array_search('标题', $header);
+    if ($title_col === false)
+        $title_col = array_search('Title', $header);
+
     $slug_col = array_search('Slug', $header);
+
     $excerpt_col = array_search('摘要', $header);
+    if ($excerpt_col === false)
+        $excerpt_col = array_search('Excerpt', $header);
+
     $content_col = array_search('内容', $header);
+    if ($content_col === false)
+        $content_col = array_search('Content', $header);
+
     $meta_title_col = array_search('Meta Title', $header);
     $meta_desc_col = array_search('Meta Description', $header);
 
     $custom_cols = [];
     foreach ($header as $idx => $col_name) {
-        if (!in_array($col_name, ['ID', '标题', 'Slug', '摘要', '内容', 'Meta Title', 'Meta Description'])) {
+        // 排除所有已知的标准列（中英文）
+        if (!in_array($col_name, ['ID', '标题', 'Title', 'Slug', '摘要', 'Excerpt', '内容', 'Content', 'Meta Title', 'Meta Description'])) {
             // 跳过 _url 结尾的列
             if (substr($col_name, -4) !== '_url') {
                 $custom_cols[$idx] = $col_name;
@@ -1609,8 +1857,9 @@ function spe_import_posts() {
     $not_found = 0;
 
     while (($row = fgetcsv($handle)) !== false) {
-        $post_id = !empty($id_col) ? intval($row[$id_col]) : 0;
-        if (!$post_id) continue;
+        $post_id = ($id_col !== false) ? intval($row[$id_col]) : 0;
+        if (!$post_id)
+            continue;
 
         // 检查是否是文章
         $post = get_post($post_id);
@@ -1639,13 +1888,51 @@ function spe_import_posts() {
             wp_update_post($update_data);
         }
 
-        // AIOSEO
+        // AIOSEO - 支持多种存储方式
         if ($meta_title_col !== false && $row[$meta_title_col] !== '') {
-            update_post_meta($post_id, '_aioseo_title', ['title' => $row[$meta_title_col]]);
+            $meta_title = $row[$meta_title_col];
+
+            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
+            global $wpdb;
+            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
+                $existing = $wpdb->get_row($wpdb->prepare(
+                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
+                    $post_id
+                ));
+                if ($existing) {
+                    $wpdb->update($aioseo_table, ['title' => $meta_title], ['post_id' => $post_id], ['%s'], ['%d']);
+                } else {
+                    $wpdb->insert($aioseo_table, ['post_id' => $post_id, 'title' => $meta_title], ['%d', '%s']);
+                }
+            }
+
+            // 方式2: postmeta (兼容其他版本)
+            update_post_meta($post_id, '_aioseo_title', $meta_title);
+            update_post_meta($post_id, '_aioseop_title', $meta_title);
         }
 
         if ($meta_desc_col !== false && $row[$meta_desc_col] !== '') {
-            update_post_meta($post_id, '_aioseo_description', $row[$meta_desc_col]);
+            $meta_desc = $row[$meta_desc_col];
+
+            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
+            global $wpdb;
+            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
+            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
+                $existing = $wpdb->get_row($wpdb->prepare(
+                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
+                    $post_id
+                ));
+                if ($existing) {
+                    $wpdb->update($aioseo_table, ['description' => $meta_desc], ['post_id' => $post_id], ['%s'], ['%d']);
+                } else {
+                    $wpdb->insert($aioseo_table, ['post_id' => $post_id, 'description' => $meta_desc], ['%d', '%s']);
+                }
+            }
+
+            // 方式2: postmeta (兼容其他版本)
+            update_post_meta($post_id, '_aioseo_description', $meta_desc);
+            update_post_meta($post_id, '_aioseop_description', $meta_desc);
         }
 
         // 自定义字段
@@ -1666,6 +1953,7 @@ function spe_import_posts() {
     fclose($handle);
 
     $msg = "文章导入完成！更新了 {$updated} 个文章";
-    if ($not_found > 0) $msg .= "，{$not_found} 个 ID 未找到或不是文章类型";
+    if ($not_found > 0)
+        $msg .= "，{$not_found} 个 ID 未找到或不是文章类型";
     return ['error' => false, 'message' => $msg, 'debug' => ''];
 }
