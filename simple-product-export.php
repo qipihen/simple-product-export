@@ -3,7 +3,7 @@
 Plugin Name: 产品导入导出工具
 Plugin URI: https://github.com/yourusername/simple-product-export
 Description: 导出/导入 产品、页面、文章 和分类 CSV，包含所有自定义字段，支持筛选导出
-Version: 4.7.0
+Version: 4.7.4
 Author: zhangkun
 License: GPL v2 or later
 */
@@ -25,6 +25,347 @@ function spe_add_admin_menu()
         'dashicons-migrate',
         30
     );
+}
+
+/**
+ * 标准化 CSV 表头：去除 BOM、首尾空格，避免列匹配失败
+ */
+function spe_normalize_csv_header($header)
+{
+    if (!is_array($header)) {
+        return [];
+    }
+
+    foreach ($header as $idx => $col_name) {
+        if (!is_string($col_name)) {
+            continue;
+        }
+        $clean = trim($col_name);
+        $clean = str_replace("\xEF\xBB\xBF", '', $clean);
+        $clean = preg_replace('/^\x{FEFF}/u', '', $clean);
+        $header[$idx] = $clean;
+    }
+
+    return $header;
+}
+
+/**
+ * 获取 AIOSEO terms 表信息（如存在）
+ */
+function spe_get_aioseo_terms_table_info()
+{
+    static $cache = null;
+
+    if ($cache !== null) {
+        return $cache;
+    }
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'aioseo_terms';
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+
+    if ($exists !== $table) {
+        $cache = ['table' => '', 'columns' => []];
+        return $cache;
+    }
+
+    $columns = $wpdb->get_col("SHOW COLUMNS FROM `{$table}`", 0);
+    if (!is_array($columns)) {
+        $columns = [];
+    }
+
+    $cache = ['table' => $table, 'columns' => $columns];
+    return $cache;
+}
+
+/**
+ * 在候选列中找到第一个存在于表结构的列名
+ */
+function spe_pick_existing_column($columns, $candidates)
+{
+    foreach ($candidates as $candidate) {
+        if (in_array($candidate, $columns, true)) {
+            return $candidate;
+        }
+    }
+    return '';
+}
+
+/**
+ * 从 AIOSEO terms 表读取分类 SEO 标题和描述（如果有）
+ */
+function spe_get_aioseo_term_row($term_id, $taxonomy = '')
+{
+    $info = spe_get_aioseo_terms_table_info();
+    if (empty($info['table']) || empty($info['columns'])) {
+        return ['title' => '', 'description' => ''];
+    }
+
+    $columns = $info['columns'];
+    $table = $info['table'];
+
+    $id_col = spe_pick_existing_column($columns, ['term_id', 'term_taxonomy_id', 'object_id', 'taxonomy_id']);
+    $tax_col = spe_pick_existing_column($columns, ['taxonomy', 'taxonomies']);
+    $title_col = spe_pick_existing_column($columns, ['title', 'seo_title']);
+    $desc_col = spe_pick_existing_column($columns, ['description', 'seo_description', 'meta_description']);
+
+    if (!$id_col || (!$title_col && !$desc_col)) {
+        return ['title' => '', 'description' => ''];
+    }
+
+    $select_cols = [];
+    if ($title_col) {
+        $select_cols[] = "`{$title_col}` AS title";
+    }
+    if ($desc_col) {
+        $select_cols[] = "`{$desc_col}` AS description";
+    }
+
+    if (empty($select_cols)) {
+        return ['title' => '', 'description' => ''];
+    }
+
+    global $wpdb;
+    $where = ["`{$id_col}` = %d"];
+    $args = [intval($term_id)];
+
+    if ($tax_col && $taxonomy !== '') {
+        $where[] = "`{$tax_col}` = %s";
+        $args[] = $taxonomy;
+    }
+
+    $sql = "SELECT " . implode(', ', $select_cols) . " FROM `{$table}` WHERE " . implode(' AND ', $where) . " LIMIT 1";
+    $row = $wpdb->get_row($wpdb->prepare($sql, ...$args), ARRAY_A);
+
+    if (!$row && $tax_col && $taxonomy !== '') {
+        // 某些站点可能未记录 taxonomy 列，回退到 term_id 单条件查询
+        $sql = "SELECT " . implode(', ', $select_cols) . " FROM `{$table}` WHERE `{$id_col}` = %d LIMIT 1";
+        $row = $wpdb->get_row($wpdb->prepare($sql, intval($term_id)), ARRAY_A);
+    }
+
+    return [
+        'title' => isset($row['title']) ? (string) $row['title'] : '',
+        'description' => isset($row['description']) ? (string) $row['description'] : '',
+    ];
+}
+
+/**
+ * 将分类 SEO 标题和描述同步写入 AIOSEO terms 表（如存在）
+ */
+function spe_sync_aioseo_term_row($term_id, $taxonomy = '', $title = null, $description = null)
+{
+    $info = spe_get_aioseo_terms_table_info();
+    if (empty($info['table']) || empty($info['columns'])) {
+        return false;
+    }
+
+    $columns = $info['columns'];
+    $table = $info['table'];
+
+    $id_col = spe_pick_existing_column($columns, ['term_id', 'term_taxonomy_id', 'object_id', 'taxonomy_id']);
+    $tax_col = spe_pick_existing_column($columns, ['taxonomy', 'taxonomies']);
+    $title_col = spe_pick_existing_column($columns, ['title', 'seo_title']);
+    $desc_col = spe_pick_existing_column($columns, ['description', 'seo_description', 'meta_description']);
+
+    if (!$id_col) {
+        return false;
+    }
+
+    $data = [];
+    $formats = [];
+
+    if ($title !== null && $title_col) {
+        $data[$title_col] = $title;
+        $formats[] = '%s';
+    }
+    if ($description !== null && $desc_col) {
+        $data[$desc_col] = $description;
+        $formats[] = '%s';
+    }
+
+    if (empty($data)) {
+        return false;
+    }
+
+    global $wpdb;
+    $where = [$id_col => intval($term_id)];
+    $where_formats = ['%d'];
+
+    if ($tax_col && $taxonomy !== '') {
+        $where[$tax_col] = $taxonomy;
+        $where_formats[] = '%s';
+    }
+
+    $existing = $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(1) FROM `{$table}` WHERE `{$id_col}` = %d",
+        intval($term_id)
+    ));
+
+    if (intval($existing) > 0) {
+        $wpdb->update($table, $data, $where, $formats, $where_formats);
+        return true;
+    }
+
+    $insert_data = $data;
+    $insert_data[$id_col] = intval($term_id);
+    $insert_formats = $formats;
+    $insert_formats[] = '%d';
+
+    if ($tax_col && $taxonomy !== '') {
+        $insert_data[$tax_col] = $taxonomy;
+        $insert_formats[] = '%s';
+    }
+
+    $wpdb->insert($table, $insert_data, $insert_formats);
+    return true;
+}
+
+/**
+ * 读取 Rank Math 分类 SEO 字段
+ */
+function spe_get_rankmath_term_meta($term_id)
+{
+    return [
+        'title' => (string) get_term_meta($term_id, 'rank_math_title', true),
+        'description' => (string) get_term_meta($term_id, 'rank_math_description', true),
+    ];
+}
+
+/**
+ * 同步 Rank Math 分类 SEO 字段
+ */
+function spe_sync_rankmath_term_meta($term_id, $title = null, $description = null)
+{
+    if ($title !== null) {
+        update_term_meta($term_id, 'rank_math_title', $title);
+    }
+    if ($description !== null) {
+        update_term_meta($term_id, 'rank_math_description', $description);
+    }
+}
+
+/**
+ * 读取 Yoast 分类 SEO 字段（option: wpseo_taxonomy_meta）
+ */
+function spe_get_yoast_term_meta($term_id, $taxonomy = '')
+{
+    if ($taxonomy === '') {
+        return ['title' => '', 'description' => ''];
+    }
+
+    $all = get_option('wpseo_taxonomy_meta', []);
+    if (!is_array($all) || !isset($all[$taxonomy]) || !isset($all[$taxonomy][$term_id]) || !is_array($all[$taxonomy][$term_id])) {
+        return ['title' => '', 'description' => ''];
+    }
+
+    $row = $all[$taxonomy][$term_id];
+    return [
+        'title' => (string) ($row['wpseo_title'] ?? $row['title'] ?? ''),
+        'description' => (string) ($row['wpseo_desc'] ?? $row['desc'] ?? ''),
+    ];
+}
+
+/**
+ * 同步 Yoast 分类 SEO 字段（option: wpseo_taxonomy_meta）
+ */
+function spe_sync_yoast_term_meta($term_id, $taxonomy = '', $title = null, $description = null)
+{
+    if ($taxonomy === '' || ($title === null && $description === null)) {
+        return false;
+    }
+
+    $all = get_option('wpseo_taxonomy_meta', []);
+    if (!is_array($all)) {
+        $all = [];
+    }
+    if (!isset($all[$taxonomy]) || !is_array($all[$taxonomy])) {
+        $all[$taxonomy] = [];
+    }
+    if (!isset($all[$taxonomy][$term_id]) || !is_array($all[$taxonomy][$term_id])) {
+        $all[$taxonomy][$term_id] = [];
+    }
+
+    if ($title !== null) {
+        $all[$taxonomy][$term_id]['wpseo_title'] = $title;
+        $all[$taxonomy][$term_id]['title'] = $title;
+        update_term_meta($term_id, 'wpseo_title', $title);
+    }
+    if ($description !== null) {
+        $all[$taxonomy][$term_id]['wpseo_desc'] = $description;
+        $all[$taxonomy][$term_id]['desc'] = $description;
+        update_term_meta($term_id, 'wpseo_desc', $description);
+    }
+
+    update_option('wpseo_taxonomy_meta', $all, false);
+    return true;
+}
+
+/**
+ * 统一读取分类 SEO 标题/描述（AIOSEO > Rank Math > Yoast）
+ */
+function spe_get_term_seo_meta($term_id, $taxonomy = '')
+{
+    $meta_title = '';
+    $meta_desc = '';
+
+    // AIOSEO termmeta
+    $aioseo_title = get_term_meta($term_id, '_aioseo_title', true);
+    if (is_array($aioseo_title)) {
+        $meta_title = $aioseo_title['title'] ?? '';
+    } elseif (is_string($aioseo_title)) {
+        $meta_title = $aioseo_title;
+    }
+    if (empty($meta_title)) {
+        $meta_title = get_term_meta($term_id, '_aioseop_title', true);
+    }
+
+    $aioseo_desc = get_term_meta($term_id, '_aioseo_description', true);
+    if (is_array($aioseo_desc)) {
+        $meta_desc = $aioseo_desc['description'] ?? '';
+    } elseif (is_string($aioseo_desc)) {
+        $meta_desc = $aioseo_desc;
+    }
+    if (empty($meta_desc)) {
+        $meta_desc = get_term_meta($term_id, '_aioseop_description', true);
+    }
+
+    // AIOSEO table
+    if (empty($meta_title) || empty($meta_desc)) {
+        $aioseo_row = spe_get_aioseo_term_row($term_id, $taxonomy);
+        if (empty($meta_title) && !empty($aioseo_row['title'])) {
+            $meta_title = $aioseo_row['title'];
+        }
+        if (empty($meta_desc) && !empty($aioseo_row['description'])) {
+            $meta_desc = $aioseo_row['description'];
+        }
+    }
+
+    // Rank Math fallback
+    if (empty($meta_title) || empty($meta_desc)) {
+        $rankmath = spe_get_rankmath_term_meta($term_id);
+        if (empty($meta_title) && !empty($rankmath['title'])) {
+            $meta_title = $rankmath['title'];
+        }
+        if (empty($meta_desc) && !empty($rankmath['description'])) {
+            $meta_desc = $rankmath['description'];
+        }
+    }
+
+    // Yoast fallback
+    if (empty($meta_title) || empty($meta_desc)) {
+        $yoast = spe_get_yoast_term_meta($term_id, $taxonomy);
+        if (empty($meta_title) && !empty($yoast['title'])) {
+            $meta_title = $yoast['title'];
+        }
+        if (empty($meta_desc) && !empty($yoast['description'])) {
+            $meta_desc = $yoast['description'];
+        }
+    }
+
+    return [
+        'title' => (string) $meta_title,
+        'description' => (string) $meta_desc,
+    ];
 }
 
 function spe_admin_page()
@@ -620,18 +961,38 @@ function spe_export_taxonomies($taxonomy = 'product_cat')
         exit;
     }
 
-    // 扫描第一个分类的 meta
-    $first_id = $categories[0]->term_id;
+    // 扫描该 taxonomy 下所有分类的 meta（避免只取首条导致字段缺失）
     $all_meta_keys = $wpdb->get_col($wpdb->prepare(
-        "SELECT DISTINCT meta_key FROM {$wpdb->termmeta} 
-        WHERE term_id = %d 
-        AND meta_key NOT LIKE '\_%'
-        ORDER BY meta_key",
-        $first_id
+        "SELECT DISTINCT tm.meta_key
+        FROM {$wpdb->termmeta} tm
+        INNER JOIN {$wpdb->term_taxonomy} tt ON tm.term_id = tt.term_id
+        WHERE tt.taxonomy = %s
+        AND tm.meta_key NOT LIKE '\_%'
+        ORDER BY tm.meta_key",
+        $taxonomy
     ));
 
     $exclude_keys = ['_product_count', '_thumbnail_id'];
     $custom_fields = array_values(array_diff($all_meta_keys, $exclude_keys));
+
+    // 强制保留关键模板字段，确保即使当前都为空也能导出到 CSV 列头
+    $required_fields = [
+        'hero_bg_image',
+        'cat_image',
+        'cat_pdf',
+        'youtube_url',
+        'intro_title',
+        'intro_subtitle',
+        'intro_image_caption',
+        'category_subtitle',
+        'feature_tags',
+        'standards_html',
+        'model_reference_html',
+        'key_specifications_html',
+        'faq_items',
+        'applications'
+    ];
+    $custom_fields = array_values(array_unique(array_merge($required_fields, $custom_fields)));
     sort($custom_fields);
 
     $header = ['ID', '标题', 'Slug', '描述', '父分类 ID'];
@@ -669,31 +1030,9 @@ function spe_export_taxonomies($taxonomy = 'product_cat')
     foreach ($categories as $cat) {
         $id = $cat->term_id;
 
-        // AIOSEO - 分类使用 termmeta
-        $meta_title = '';
-        $meta_desc = '';
-
-        // 尝试多种方式获取 Meta Title
-        $aioseo_title = get_term_meta($id, '_aioseo_title', true);
-        if (is_array($aioseo_title)) {
-            $meta_title = $aioseo_title['title'] ?? '';
-        } elseif (is_string($aioseo_title)) {
-            $meta_title = $aioseo_title;
-        }
-        if (empty($meta_title)) {
-            $meta_title = get_term_meta($id, '_aioseop_title', true);
-        }
-
-        // 尝试多种方式获取 Meta Description
-        $aioseo_desc = get_term_meta($id, '_aioseo_description', true);
-        if (is_array($aioseo_desc)) {
-            $meta_desc = $aioseo_desc['description'] ?? '';
-        } elseif (is_string($aioseo_desc)) {
-            $meta_desc = $aioseo_desc;
-        }
-        if (empty($meta_desc)) {
-            $meta_desc = get_term_meta($id, '_aioseop_description', true);
-        }
+        $seo_meta = spe_get_term_seo_meta($id, $taxonomy);
+        $meta_title = $seo_meta['title'];
+        $meta_desc = $seo_meta['description'];
 
         $row = [
             $id,
@@ -754,6 +1093,7 @@ function spe_import_products()
         fclose($handle);
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
+    $header = spe_normalize_csv_header($header);
 
     $id_col = array_search('ID', $header);
     $title_col = array_search('标题', $header);
@@ -784,7 +1124,7 @@ function spe_import_products()
     $not_found = 0;
 
     while (($row = fgetcsv($handle)) !== false) {
-        $product_id = ($id_col !== false) ? intval($row[$id_col]) : 0;
+        $product_id = ($id_col !== false && isset($row[$id_col])) ? intval(preg_replace('/[^0-9]/', '', (string) $row[$id_col])) : 0;
         if (!$product_id)
             continue;
 
@@ -925,6 +1265,7 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
         fclose($handle);
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
+    $header = spe_normalize_csv_header($header);
 
     // 标准化表头为小写，用于不区分大小写匹配
     $header_lower = array_map('strtolower', $header);
@@ -977,8 +1318,17 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
         $col_lower = strtolower($col_name);
         // 排除已知的标准列
         if (!in_array($col_lower, ['id', 'term_id', '标题', '名称', 'name', 'slug', '描述', 'parent', '父分类 id', 'meta title', 'meta description', 'title', 'description'])) {
-            // 跳过 _url 结尾的列
-            if (substr($col_name, -4) !== '_url') {
+            // 仅跳过“附件ID导出辅助列”，例如 cat_image + cat_image_url
+            // 保留真正业务字段（如 youtube_url）
+            $is_helper_url_col = false;
+            if (substr($col_name, -4) === '_url') {
+                $base_col = substr($col_name, 0, -4);
+                if (in_array($base_col, $header, true)) {
+                    $is_helper_url_col = true;
+                }
+            }
+
+            if (!$is_helper_url_col) {
                 $custom_cols[$idx] = $col_name;
             }
         }
@@ -1004,18 +1354,12 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
     while (($row = fgetcsv($handle)) !== false) {
         $all_rows[] = $row;
     }
-    $debug_log .= "CSV总行数(含表头): " . count($all_rows) . "\n";
-    $debug_log .= "数据行数: " . max(0, count($all_rows) - 1) . "\n";
+    $debug_log .= "CSV总行数(含表头): " . (count($all_rows) + 1) . "\n";
+    $debug_log .= "数据行数: " . count($all_rows) . "\n";
 
     // 重新处理每一行数据
     foreach ($all_rows as $row_index => $row) {
         $row_count++;
-
-        // 跳过第一行（表头）
-        if ($row_index === 0) {
-            $debug_log .= "跳过表头行\n";
-            continue;
-        }
 
         $debug_log .= "\n--- 处理第 $row_count 行 ---\n";
         $debug_log .= "行数组: " . json_encode($row, JSON_UNESCAPED_UNICODE) . "\n";
@@ -1116,6 +1460,9 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
             $debug_log .= "  父分类设置为: $parent_id\n";
         }
 
+        $meta_title_value = null;
+        $meta_desc_value = null;
+
         // AIOSEO Meta Title - 支持多种格式
         if ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '') {
             $meta_title_value = $row[$meta_title_col];
@@ -1174,6 +1521,33 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
             update_term_meta($cat_id, '_aioseop_description', $meta_desc_value);
 
             $debug_log .= "  更新 Meta Description: {$row[$meta_desc_col]}\n";
+        }
+
+        // 同步 AIOSEO 4.x terms 表（前台实际读取该表时可立即生效）
+        if ($meta_title_value !== null || $meta_desc_value !== null) {
+            $synced = spe_sync_aioseo_term_row($cat_id, $taxonomy, $meta_title_value, $meta_desc_value);
+            if ($synced) {
+                $debug_log .= "  已同步 aioseo_terms 表\n";
+            } else {
+                $debug_log .= "  未同步 aioseo_terms 表（表不存在或结构不匹配）\n";
+            }
+
+            // 同步 Rank Math
+            spe_sync_rankmath_term_meta($cat_id, $meta_title_value, $meta_desc_value);
+            $debug_log .= "  已同步 rank_math_title / rank_math_description\n";
+
+            // 同步 Yoast
+            $yoast_synced = spe_sync_yoast_term_meta($cat_id, $taxonomy, $meta_title_value, $meta_desc_value);
+            if ($yoast_synced) {
+                $debug_log .= "  已同步 wpseo_taxonomy_meta\n";
+            } else {
+                $debug_log .= "  未同步 wpseo_taxonomy_meta（未检测到 taxonomy 或无需更新）\n";
+            }
+
+            // 回读验证
+            $seo_verify = spe_get_term_seo_meta($cat_id, $taxonomy);
+            $debug_log .= "  回读SEO Title: " . ($seo_verify['title'] !== '' ? $seo_verify['title'] : '[empty]') . "\n";
+            $debug_log .= "  回读SEO Description: " . ($seo_verify['description'] !== '' ? $seo_verify['description'] : '[empty]') . "\n";
         }
 
         // 自定义字段
@@ -1665,6 +2039,7 @@ function spe_import_pages()
         fclose($handle);
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
+    $header = spe_normalize_csv_header($header);
 
     // 支持中英文列名
     $id_col = array_search('ID', $header);
@@ -1701,7 +2076,7 @@ function spe_import_pages()
     $not_found = 0;
 
     while (($row = fgetcsv($handle)) !== false) {
-        $page_id = ($id_col !== false) ? intval($row[$id_col]) : 0;
+        $page_id = ($id_col !== false && isset($row[$id_col])) ? intval(preg_replace('/[^0-9]/', '', (string) $row[$id_col])) : 0;
         if (!$page_id)
             continue;
 
@@ -1821,6 +2196,7 @@ function spe_import_posts()
         fclose($handle);
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
+    $header = spe_normalize_csv_header($header);
 
     // 支持中英文列名
     $id_col = array_search('ID', $header);
@@ -1857,7 +2233,7 @@ function spe_import_posts()
     $not_found = 0;
 
     while (($row = fgetcsv($handle)) !== false) {
-        $post_id = ($id_col !== false) ? intval($row[$id_col]) : 0;
+        $post_id = ($id_col !== false && isset($row[$id_col])) ? intval(preg_replace('/[^0-9]/', '', (string) $row[$id_col])) : 0;
         if (!$post_id)
             continue;
 
