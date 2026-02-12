@@ -13,13 +13,31 @@
 - 文章（Post）导入导出
 - 产品分类导入导出
 - 支持所有自定义字段（ACF）自动识别
-- 支持 All In One SEO (AIOSEO) 元数据
+- SEO 元数据同步（按当前激活插件：AIOSEO / Rank Math / Yoast）
 - 按分类和关键词筛选导出
-- 可视化调试信息输出
+- 分类字段级选择导出（支持最小化回导）
+- 异常行 + 汇总导入日志输出
 
 ## 版本信息
 
-**当前版本：** 4.3.1
+**当前版本：** 4.7.6
+
+## 本地交付文件（都在本目录）
+
+- 插件源码：`simple-product-export.php`
+- 最新打包：`simple-product-export-v4.7.6.zip`
+- 通用安装包别名：`simple-product-export.zip`
+- 文档目录：`docs/`
+  - `docs/GITHUB_PROJECT_OVERVIEW.md`（GitHub 功能总览）
+  - `docs/RELEASE_NOTES_v4.7.6.md`
+  - `docs/CSV_CONTRACT.md`
+  - `docs/FAILURE_MATRIX.md`
+
+## GitHub 文档入口
+
+- 项目功能总览：`docs/GITHUB_PROJECT_OVERVIEW.md`
+- CSV 契约：`docs/CSV_CONTRACT.md`
+- 常见问题矩阵：`docs/FAILURE_MATRIX.md`
 
 ## 安装说明
 
@@ -80,6 +98,12 @@ portable-ev-charger/gem-series
 插件会自动提取最后一部分作为实际 slug，即 `gem-series`。
 
 ## 版本历史
+
+### v4.7.6 (2026-02-12)
+- 新增 ZIP/XLSX 误传检测（`PK\x03\x04` 文件头）
+- 增强分类 SEO 同步与回读验证（AIOSEO / Rank Math / Yoast）
+- 增强分类导入调试日志（列索引、逐行处理信息）
+- 优化 ACF 优先写入与辅助 URL 列过滤逻辑
 
 ### v4.3.1 (2026-02-10)
 - 增强调试信息输出，显示所有 term_meta keys
