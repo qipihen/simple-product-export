@@ -2410,6 +2410,12 @@ function spe_get_taxonomy_custom_fields($taxonomy)
  */
 function spe_get_taxonomy_export_field_options($taxonomy)
 {
+    static $options_cache = [];
+    $taxonomy_key = trim((string) $taxonomy);
+    if ($taxonomy_key !== '' && isset($options_cache[$taxonomy_key])) {
+        return $options_cache[$taxonomy_key];
+    }
+
     $options = [];
     $base = spe_get_taxonomy_base_export_fields();
     foreach ($base as $key => $meta) {
@@ -2426,6 +2432,10 @@ function spe_get_taxonomy_export_field_options($taxonomy)
             'label' => $field,
             'group' => 'custom',
         ];
+    }
+
+    if ($taxonomy_key !== '') {
+        $options_cache[$taxonomy_key] = $options;
     }
 
     return $options;
@@ -3368,12 +3378,16 @@ function spe_admin_page()
         $import_taxonomy_ui = $default_taxonomy;
     }
 
-    $selected_tax_fields_ui = spe_resolve_taxonomy_export_fields(
-        $export_taxonomy_ui,
+    $selected_tax_fields_ui = array_values(array_unique(array_filter(array_map(
+        function ($item) {
+            return sanitize_text_field((string) $item);
+        },
         isset($_GET['spe_tax_fields']) ? (array) $_GET['spe_tax_fields'] : []
-    );
+    ))));
+    if (!empty($selected_tax_fields_ui) && !in_array('id', $selected_tax_fields_ui, true)) {
+        array_unshift($selected_tax_fields_ui, 'id');
+    }
 
-    $taxonomy_field_options = spe_get_taxonomy_export_field_options($export_taxonomy_ui);
     $tax_field_nonce = wp_create_nonce('spe_tax_fields_nonce');
     $import_ui_defaults = spe_get_import_ui_defaults();
     $product_import_defaults = isset($import_ui_defaults['product']) && is_array($import_ui_defaults['product']) ? $import_ui_defaults['product'] : ['allow_insert' => false, 'unique_meta_field' => ''];
@@ -4299,9 +4313,9 @@ function spe_admin_page()
 
                 const initialTaxonomy = <?php echo wp_json_encode($export_taxonomy_ui); ?>;
                 const fieldMap = {};
-                fieldMap[initialTaxonomy] = <?php echo wp_json_encode($taxonomy_field_options); ?>;
                 const pendingFieldLoads = {};
-                const selectedByTax = <?php echo wp_json_encode([$export_taxonomy_ui => $selected_tax_fields_ui]); ?>;
+                const selectedByTax = {};
+                selectedByTax[initialTaxonomy] = <?php echo wp_json_encode($selected_tax_fields_ui); ?>;
                 const ajaxEndpoint = <?php echo wp_json_encode(admin_url('admin-ajax.php')); ?>;
                 const taxFieldNonce = <?php echo wp_json_encode($tax_field_nonce); ?>;
                 const taxonomySelect = document.getElementById('spe-taxonomy-select');
