@@ -826,6 +826,157 @@ function spe_sync_term_seo_meta_by_active_provider($term_id, $taxonomy, $title =
 }
 
 /**
+ * 获取 AIOSEO posts 表信息（如存在）
+ */
+function spe_get_aioseo_posts_table_info()
+{
+    static $cache = null;
+
+    if ($cache !== null) {
+        return $cache;
+    }
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'aioseo_posts';
+    $exists = $wpdb->get_var($wpdb->prepare("SHOW TABLES LIKE %s", $table));
+
+    if ($exists !== $table) {
+        $cache = ['table' => '', 'columns' => []];
+        return $cache;
+    }
+
+    $columns = $wpdb->get_col("SHOW COLUMNS FROM `{$table}`", 0);
+    if (!is_array($columns)) {
+        $columns = [];
+    }
+
+    $cache = ['table' => $table, 'columns' => $columns];
+    return $cache;
+}
+
+/**
+ * 将文章 SEO 标题和描述同步写入 AIOSEO posts 表（如存在）
+ */
+function spe_sync_aioseo_post_row($post_id, $title = null, $description = null)
+{
+    $info = spe_get_aioseo_posts_table_info();
+    if (empty($info['table']) || empty($info['columns'])) {
+        return false;
+    }
+
+    $columns = $info['columns'];
+    $table = $info['table'];
+
+    $id_col = spe_pick_existing_column($columns, ['post_id', 'object_id', 'id']);
+    $title_col = spe_pick_existing_column($columns, ['title', 'seo_title']);
+    $desc_col = spe_pick_existing_column($columns, ['description', 'seo_description', 'meta_description']);
+
+    if (!$id_col) {
+        return false;
+    }
+
+    $data = [];
+    $formats = [];
+
+    if ($title !== null && $title_col) {
+        $data[$title_col] = $title;
+        $formats[] = '%s';
+    }
+    if ($description !== null && $desc_col) {
+        $data[$desc_col] = $description;
+        $formats[] = '%s';
+    }
+
+    if (empty($data)) {
+        return false;
+    }
+
+    global $wpdb;
+    $existing = $wpdb->get_var($wpdb->prepare(
+        "SELECT COUNT(1) FROM `{$table}` WHERE `{$id_col}` = %d",
+        intval($post_id)
+    ));
+
+    if (intval($existing) > 0) {
+        $wpdb->update(
+            $table,
+            $data,
+            [$id_col => intval($post_id)],
+            $formats,
+            ['%d']
+        );
+        return true;
+    }
+
+    $insert_data = $data;
+    $insert_data[$id_col] = intval($post_id);
+    $insert_formats = $formats;
+    $insert_formats[] = '%d';
+
+    $wpdb->insert($table, $insert_data, $insert_formats);
+    return true;
+}
+
+/**
+ * 同步 Rank Math 文章 SEO 字段
+ */
+function spe_sync_rankmath_post_meta($post_id, $title = null, $description = null)
+{
+    if ($title !== null) {
+        update_post_meta($post_id, 'rank_math_title', $title);
+    }
+    if ($description !== null) {
+        update_post_meta($post_id, 'rank_math_description', $description);
+    }
+}
+
+/**
+ * 同步 Yoast 文章 SEO 字段
+ */
+function spe_sync_yoast_post_meta($post_id, $title = null, $description = null)
+{
+    if ($title !== null) {
+        update_post_meta($post_id, '_yoast_wpseo_title', $title);
+    }
+    if ($description !== null) {
+        update_post_meta($post_id, '_yoast_wpseo_metadesc', $description);
+    }
+}
+
+/**
+ * 仅同步文章 SEO 到当前激活插件，避免跨插件副作用
+ */
+function spe_sync_post_seo_meta_by_active_provider($post_id, $title = null, $description = null)
+{
+    $provider = spe_get_active_seo_provider();
+
+    if ($provider === 'aioseo') {
+        if ($title !== null) {
+            update_post_meta($post_id, '_aioseo_title', $title);
+            update_post_meta($post_id, '_aioseop_title', $title);
+        }
+        if ($description !== null) {
+            update_post_meta($post_id, '_aioseo_description', $description);
+            update_post_meta($post_id, '_aioseop_description', $description);
+        }
+        $synced = spe_sync_aioseo_post_row($post_id, $title, $description);
+        return ['provider' => 'aioseo', 'synced' => $synced];
+    }
+
+    if ($provider === 'rankmath') {
+        spe_sync_rankmath_post_meta($post_id, $title, $description);
+        return ['provider' => 'rankmath', 'synced' => true];
+    }
+
+    if ($provider === 'yoast') {
+        spe_sync_yoast_post_meta($post_id, $title, $description);
+        return ['provider' => 'yoast', 'synced' => true];
+    }
+
+    return ['provider' => '', 'synced' => false];
+}
+
+/**
  * 分类导出的基础字段定义（固定顺序）
  */
 function spe_get_taxonomy_base_export_fields()
@@ -2270,73 +2421,14 @@ function spe_import_products()
             wp_update_post($update_data);
         }
 
-        // AIOSEO - 支持多种存储方式
-        $meta_title = ($meta_title_col !== false && isset($row[$meta_title_col])) ? $row[$meta_title_col] : '';
-        if ($meta_title !== '') {
-
-            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
-            global $wpdb;
-            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
-            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
-                $existing = $wpdb->get_row($wpdb->prepare(
-                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
-                    $product_id
-                ));
-
-                if ($existing) {
-                    $wpdb->update(
-                        $aioseo_table,
-                        ['title' => $meta_title],
-                        ['post_id' => $product_id],
-                        ['%s'],
-                        ['%d']
-                    );
-                } else {
-                    $wpdb->insert(
-                        $aioseo_table,
-                        ['post_id' => $product_id, 'title' => $meta_title],
-                        ['%d', '%s']
-                    );
-                }
-            }
-
-            // 方式2: postmeta (兼容其他版本)
-            update_post_meta($product_id, '_aioseo_title', $meta_title);
-            update_post_meta($product_id, '_aioseop_title', $meta_title);
-        }
-
-        $meta_desc = ($meta_desc_col !== false && isset($row[$meta_desc_col])) ? $row[$meta_desc_col] : '';
-        if ($meta_desc !== '') {
-
-            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
-            global $wpdb;
-            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
-            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
-                $existing = $wpdb->get_row($wpdb->prepare(
-                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
-                    $product_id
-                ));
-
-                if ($existing) {
-                    $wpdb->update(
-                        $aioseo_table,
-                        ['description' => $meta_desc],
-                        ['post_id' => $product_id],
-                        ['%s'],
-                        ['%d']
-                    );
-                } else {
-                    $wpdb->insert(
-                        $aioseo_table,
-                        ['post_id' => $product_id, 'description' => $meta_desc],
-                        ['%d', '%s']
-                    );
-                }
-            }
-
-            // 方式2: postmeta (兼容其他版本)
-            update_post_meta($product_id, '_aioseo_description', $meta_desc);
-            update_post_meta($product_id, '_aioseop_description', $meta_desc);
+        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
+            ? $row[$meta_title_col]
+            : null;
+        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
+            ? $row[$meta_desc_col]
+            : null;
+        if ($meta_title_value !== null || $meta_desc_value !== null) {
+            spe_sync_post_seo_meta_by_active_provider($product_id, $meta_title_value, $meta_desc_value);
         }
 
         // 自定义字段
@@ -3096,51 +3188,14 @@ function spe_import_pages()
             wp_update_post($update_data);
         }
 
-        // AIOSEO - 支持多种存储方式
-        $meta_title = ($meta_title_col !== false && isset($row[$meta_title_col])) ? $row[$meta_title_col] : '';
-        if ($meta_title !== '') {
-
-            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
-            global $wpdb;
-            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
-            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
-                $existing = $wpdb->get_row($wpdb->prepare(
-                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
-                    $page_id
-                ));
-                if ($existing) {
-                    $wpdb->update($aioseo_table, ['title' => $meta_title], ['post_id' => $page_id], ['%s'], ['%d']);
-                } else {
-                    $wpdb->insert($aioseo_table, ['post_id' => $page_id, 'title' => $meta_title], ['%d', '%s']);
-                }
-            }
-
-            // 方式2: postmeta (兼容其他版本)
-            update_post_meta($page_id, '_aioseo_title', $meta_title);
-            update_post_meta($page_id, '_aioseop_title', $meta_title);
-        }
-
-        $meta_desc = ($meta_desc_col !== false && isset($row[$meta_desc_col])) ? $row[$meta_desc_col] : '';
-        if ($meta_desc !== '') {
-
-            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
-            global $wpdb;
-            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
-            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
-                $existing = $wpdb->get_row($wpdb->prepare(
-                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
-                    $page_id
-                ));
-                if ($existing) {
-                    $wpdb->update($aioseo_table, ['description' => $meta_desc], ['post_id' => $page_id], ['%s'], ['%d']);
-                } else {
-                    $wpdb->insert($aioseo_table, ['post_id' => $page_id, 'description' => $meta_desc], ['%d', '%s']);
-                }
-            }
-
-            // 方式2: postmeta (兼容其他版本)
-            update_post_meta($page_id, '_aioseo_description', $meta_desc);
-            update_post_meta($page_id, '_aioseop_description', $meta_desc);
+        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
+            ? $row[$meta_title_col]
+            : null;
+        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
+            ? $row[$meta_desc_col]
+            : null;
+        if ($meta_title_value !== null || $meta_desc_value !== null) {
+            spe_sync_post_seo_meta_by_active_provider($page_id, $meta_title_value, $meta_desc_value);
         }
 
         // 自定义字段
@@ -3250,51 +3305,14 @@ function spe_import_posts()
             wp_update_post($update_data);
         }
 
-        // AIOSEO - 支持多种存储方式
-        $meta_title = ($meta_title_col !== false && isset($row[$meta_title_col])) ? $row[$meta_title_col] : '';
-        if ($meta_title !== '') {
-
-            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
-            global $wpdb;
-            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
-            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
-                $existing = $wpdb->get_row($wpdb->prepare(
-                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
-                    $post_id
-                ));
-                if ($existing) {
-                    $wpdb->update($aioseo_table, ['title' => $meta_title], ['post_id' => $post_id], ['%s'], ['%d']);
-                } else {
-                    $wpdb->insert($aioseo_table, ['post_id' => $post_id, 'title' => $meta_title], ['%d', '%s']);
-                }
-            }
-
-            // 方式2: postmeta (兼容其他版本)
-            update_post_meta($post_id, '_aioseo_title', $meta_title);
-            update_post_meta($post_id, '_aioseop_title', $meta_title);
-        }
-
-        $meta_desc = ($meta_desc_col !== false && isset($row[$meta_desc_col])) ? $row[$meta_desc_col] : '';
-        if ($meta_desc !== '') {
-
-            // 方式1: aioseo_posts 表 (AIOSEO 4.x)
-            global $wpdb;
-            $aioseo_table = $wpdb->prefix . 'aioseo_posts';
-            if ($wpdb->get_var("SHOW TABLES LIKE '$aioseo_table'") == $aioseo_table) {
-                $existing = $wpdb->get_row($wpdb->prepare(
-                    "SELECT * FROM $aioseo_table WHERE post_id = %d",
-                    $post_id
-                ));
-                if ($existing) {
-                    $wpdb->update($aioseo_table, ['description' => $meta_desc], ['post_id' => $post_id], ['%s'], ['%d']);
-                } else {
-                    $wpdb->insert($aioseo_table, ['post_id' => $post_id, 'description' => $meta_desc], ['%d', '%s']);
-                }
-            }
-
-            // 方式2: postmeta (兼容其他版本)
-            update_post_meta($post_id, '_aioseo_description', $meta_desc);
-            update_post_meta($post_id, '_aioseop_description', $meta_desc);
+        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
+            ? $row[$meta_title_col]
+            : null;
+        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
+            ? $row[$meta_desc_col]
+            : null;
+        if ($meta_title_value !== null || $meta_desc_value !== null) {
+            spe_sync_post_seo_meta_by_active_provider($post_id, $meta_title_value, $meta_desc_value);
         }
 
         // 自定义字段

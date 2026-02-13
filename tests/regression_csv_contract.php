@@ -123,8 +123,19 @@ assert_true(
 );
 
 assert_true(
+    function_exists('spe_sync_post_seo_meta_by_active_provider'),
+    'Post SEO sync helper should exist.'
+);
+
+assert_true(
     spe_get_active_seo_provider() === '',
     'Without active SEO plugins, provider detector should return empty string.'
+);
+
+$post_sync = spe_sync_post_seo_meta_by_active_provider(123, 'Meta T', 'Meta D');
+assert_true(
+    is_array($post_sync) && ($post_sync['provider'] ?? '') === '',
+    'Without active SEO plugins, post SEO sync should be a no-op.'
 );
 
 fwrite(STDOUT, "PASS: regression_csv_contract\n");
