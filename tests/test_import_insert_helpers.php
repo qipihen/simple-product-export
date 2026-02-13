@@ -198,4 +198,22 @@ unset($_POST['spe_import_products_profile_id']);
 $invalid_profile_selection = spe_resolve_import_match_profile_selection('invalid_type', ['spe_import_products_profile_id']);
 assert_true($invalid_profile_selection === [], 'Invalid type should not resolve any import profile selection.');
 
+$header = ['ID', '标题', 'Meta Title', 'supplier_sku'];
+$filter_disabled = spe_parse_import_column_filter($header, '');
+assert_true(empty($filter_disabled['enabled']), 'Empty import column filter should be disabled.');
+
+$filter_selected = spe_parse_import_column_filter($header, 'ID, Meta Title, 不存在列');
+assert_true(!empty($filter_selected['enabled']), 'Non-empty import column filter should be enabled.');
+assert_true(in_array(0, $filter_selected['indexes'], true), 'Import column filter should match ID index.');
+assert_true(in_array(2, $filter_selected['indexes'], true), 'Import column filter should match Meta Title index.');
+assert_true(in_array('不存在列', $filter_selected['missing'], true), 'Import column filter should report missing headers.');
+
+$_POST['spe_import_products_columns'] = "ID,标题";
+$filter_from_request = spe_resolve_import_column_filter_from_request($header, ['spe_import_products_columns']);
+assert_true(!empty($filter_from_request['enabled']), 'Import column filter should be resolved from request.');
+assert_true(spe_import_column_allowed(0, $filter_from_request) === true, 'Allowed import column should pass filter.');
+assert_true(spe_import_column_allowed(1, $filter_from_request) === true, 'Allowed import column should pass filter.');
+assert_true(spe_import_column_allowed(3, $filter_from_request) === false, 'Non-selected import column should be blocked.');
+unset($_POST['spe_import_products_columns']);
+
 fwrite(STDOUT, "PASS: test_import_insert_helpers\n");

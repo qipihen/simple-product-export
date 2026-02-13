@@ -15,26 +15,27 @@
 - 支持所有自定义字段（ACF）自动识别
 - SEO 元数据同步（按当前激活插件：AIOSEO / Rank Math / Yoast）
 - 按分类和关键词筛选导出
-- 分类字段级选择导出（支持最小化回导）
+- 产品/页面/文章/分类字段级选择导出（支持最小化回导）
 - 异常行 + 汇总导入日志输出
 - 导入匹配策略：ID / Slug / 唯一键（可配置）
 - 可选未匹配新增：支持产品、页面、文章、分类（默认关闭）
 - 后台导入面板可直接填写唯一键字段（无需改代码）
+- 导入支持“仅导入指定列名”（列白名单）
 
 ## 版本信息
 
-**当前版本：** 4.7.7
+**当前版本：** 4.7.8
 
 ## 本地交付文件（都在本目录）
 
 - 插件源码：`simple-product-export.php`
-- 最新打包：`simple-product-export-v4.7.7.zip`
+- 最新打包：`simple-product-export-v4.7.8.zip`
 - 通用安装包别名：`simple-product-export.zip`
 - 文档目录：`docs/`
   - `docs/GITHUB_PROJECT_OVERVIEW.md`（GitHub 功能总览）
   - `docs/PRD-universal-import-export.md`（通用平台产品边界）
   - `docs/plans/2026-02-13-universal-import-export-platform.md`（实施计划）
-  - `docs/RELEASE_NOTES_v4.7.7.md`
+  - `docs/RELEASE_NOTES_v4.7.8.md`
   - `docs/CSV_CONTRACT.md`
   - `docs/FAILURE_MATRIX.md`
 
@@ -126,6 +127,11 @@ portable-ev-charger/gem-series
 插件会自动提取最后一部分作为实际 slug，即 `gem-series`。
 
 ## 版本历史
+
+### v4.7.8 (2026-02-13)
+- 新增产品/页面/文章导出字段选择器（列级导出）
+- 新增产品/页面/文章/分类导入列白名单（仅按指定列名写入）
+- 导入结果会提示未命中的列名，便于排查列名拼写
 
 ### v4.7.7 (2026-02-13)
 - 新增导入匹配模板应用逻辑（产品/页面/文章/分类）
