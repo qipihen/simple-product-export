@@ -12,8 +12,1279 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
+$spe_include_files = [
+    __DIR__ . '/includes/class-spe-entity-registry.php',
+    __DIR__ . '/includes/class-spe-field-discovery.php',
+    __DIR__ . '/includes/class-spe-mapping-engine.php',
+    __DIR__ . '/includes/class-spe-match-engine.php',
+];
+foreach ($spe_include_files as $spe_file) {
+    if (is_readable($spe_file)) {
+        require_once $spe_file;
+    }
+}
+unset($spe_file, $spe_include_files);
+
 add_action('admin_menu', 'spe_add_admin_menu');
 add_action('wp_ajax_spe_get_taxonomy_export_fields', 'spe_ajax_get_taxonomy_export_fields');
+
+/**
+ * 获取实体注册中心
+ */
+function spe_get_entity_registry()
+{
+    static $registry = null;
+    if ($registry === null && class_exists('SPE_Entity_Registry')) {
+        $registry = new SPE_Entity_Registry();
+    }
+    return $registry;
+}
+
+/**
+ * 获取字段发现器
+ */
+function spe_get_field_discovery()
+{
+    static $discovery = null;
+    if ($discovery === null && class_exists('SPE_Field_Discovery')) {
+        $discovery = new SPE_Field_Discovery();
+    }
+    return $discovery;
+}
+
+/**
+ * 获取映射引擎
+ */
+function spe_get_mapping_engine()
+{
+    static $engine = null;
+    if ($engine === null && class_exists('SPE_Mapping_Engine')) {
+        $engine = new SPE_Mapping_Engine();
+    }
+    return $engine;
+}
+
+/**
+ * 获取匹配引擎
+ */
+function spe_get_match_engine()
+{
+    static $engine = null;
+    if ($engine === null && class_exists('SPE_Match_Engine')) {
+        $engine = new SPE_Match_Engine();
+    }
+    return $engine;
+}
+
+/**
+ * 获取公开 taxonomy 对象
+ */
+function spe_get_public_taxonomy_objects()
+{
+    $registry = spe_get_entity_registry();
+    if ($registry && method_exists($registry, 'get_taxonomies')) {
+        $items = $registry->get_taxonomies();
+        if (is_array($items)) {
+            return $items;
+        }
+    }
+
+    if (function_exists('get_taxonomies')) {
+        $fallback = get_taxonomies(['public' => true], 'objects');
+        return is_array($fallback) ? $fallback : [];
+    }
+
+    return [];
+}
+
+/**
+ * 获取公开 post type 对象
+ */
+function spe_get_public_post_type_objects()
+{
+    $registry = spe_get_entity_registry();
+    if ($registry && method_exists($registry, 'get_post_types')) {
+        $items = $registry->get_post_types();
+        if (is_array($items)) {
+            return $items;
+        }
+    }
+
+    if (function_exists('get_post_types')) {
+        $fallback = get_post_types(['public' => true], 'objects');
+        return is_array($fallback) ? $fallback : [];
+    }
+
+    return [];
+}
+
+/**
+ * 解析 post type 导出自定义字段（meta + ACF）
+ */
+function spe_resolve_post_export_custom_fields($post_type, $meta_keys, $exclude_keys)
+{
+    $discovery = spe_get_field_discovery();
+    if ($discovery && method_exists($discovery, 'resolve_post_custom_fields')) {
+        return $discovery->resolve_post_custom_fields($post_type, $meta_keys, $exclude_keys);
+    }
+
+    return spe_merge_export_custom_fields(
+        $meta_keys,
+        $exclude_keys,
+        spe_get_post_type_acf_field_names($post_type)
+    );
+}
+
+/**
+ * 读取映射后的列索引
+ */
+function spe_get_map_index($map, $field_key)
+{
+    if (!is_array($map) || !array_key_exists($field_key, $map)) {
+        return false;
+    }
+
+    $idx = $map[$field_key];
+    if ($idx === false || $idx === null || $idx === '') {
+        return false;
+    }
+
+    return intval($idx);
+}
+
+/**
+ * 根据列索引读取行值
+ */
+function spe_get_row_value_by_index($row, $idx)
+{
+    if (!is_array($row) || $idx === false || $idx === null) {
+        return '';
+    }
+    return isset($row[$idx]) ? $row[$idx] : '';
+}
+
+/**
+ * 获取 post 导入匹配配置
+ */
+function spe_get_post_import_match_profile($post_type)
+{
+    $profile = [
+        'strategies' => ['id', 'slug', 'unique_meta'],
+        'allow_insert' => false,
+        'unique_meta_key' => '',
+        'unique_meta_field' => '',
+    ];
+
+    if (function_exists('apply_filters')) {
+        $filtered = apply_filters('spe_post_import_match_profile', $profile, $post_type);
+        if (is_array($filtered)) {
+            $profile = array_merge($profile, $filtered);
+        }
+    }
+
+    if (!isset($profile['strategies']) || !is_array($profile['strategies'])) {
+        $profile['strategies'] = ['id', 'slug', 'unique_meta'];
+    }
+
+    $profile['strategies'] = array_values(array_unique(array_filter(array_map(function ($item) {
+        return trim((string) $item);
+    }, $profile['strategies']))));
+
+    $profile['allow_insert'] = !empty($profile['allow_insert']);
+    $profile['unique_meta_key'] = trim((string) ($profile['unique_meta_key'] ?? ''));
+    $profile['unique_meta_field'] = trim((string) ($profile['unique_meta_field'] ?? ''));
+
+    if ($profile['unique_meta_field'] !== '' && $profile['unique_meta_key'] === '') {
+        $profile['unique_meta_key'] = $profile['unique_meta_field'];
+    }
+
+    return $profile;
+}
+
+/**
+ * 构建 post 导入上下文（列映射 + 自定义字段）
+ */
+function spe_build_post_import_context($header, $post_type)
+{
+    $header = spe_normalize_csv_header($header);
+
+    $standard_cols = [
+        'id',
+        '标题',
+        'title',
+        'name',
+        '名称',
+        'slug',
+        '摘要',
+        'excerpt',
+        '短描述',
+        'short description',
+        'short_description',
+        '内容',
+        'content',
+        '长描述',
+        'long description',
+        'long_description',
+        'meta title',
+        'meta description',
+    ];
+
+    $custom_fields = [];
+    $custom_cols_fallback = [];
+    foreach ($header as $idx => $col_name) {
+        $col_name = (string) $col_name;
+        $col_lower = strtolower($col_name);
+        if (in_array($col_lower, $standard_cols, true)) {
+            continue;
+        }
+        if (spe_should_skip_helper_url_column($col_name, $header)) {
+            continue;
+        }
+        $custom_fields[] = $col_name;
+        $custom_cols_fallback[intval($idx)] = $col_name;
+    }
+
+    $map = [];
+    $discovery = spe_get_field_discovery();
+    $mapping_engine = spe_get_mapping_engine();
+    if ($discovery && $mapping_engine && method_exists($discovery, 'build_post_candidate_fields') && method_exists($mapping_engine, 'auto_map_headers')) {
+        $candidates = $discovery->build_post_candidate_fields($post_type, array_values(array_unique($custom_fields)), []);
+        $mapping_result = $mapping_engine->auto_map_headers($header, $candidates);
+        if (is_array($mapping_result) && isset($mapping_result['map']) && is_array($mapping_result['map'])) {
+            $map = $mapping_result['map'];
+        }
+    }
+
+    $fallback_aliases = [
+        'id' => ['ID', 'id'],
+        'title' => ['标题', 'Title', 'title', '名称', 'name'],
+        'slug' => ['Slug', 'slug'],
+        'excerpt' => ['短描述', 'Short Description', 'short description', 'short_description', '摘要', 'Excerpt', 'excerpt'],
+        'content' => ['长描述', 'Long Description', 'long description', 'long_description', '内容', 'Content', 'content'],
+        'meta_title' => ['Meta Title', 'meta title'],
+        'meta_description' => ['Meta Description', 'meta description'],
+    ];
+
+    $used_indexes = [];
+    foreach ($map as $mapped_idx) {
+        $used_indexes[intval($mapped_idx)] = true;
+    }
+
+    foreach ($fallback_aliases as $field_key => $aliases) {
+        if (!array_key_exists($field_key, $map)) {
+            $idx = spe_find_header_col($header, $aliases);
+            if ($idx !== false) {
+                $idx = intval($idx);
+                if (!isset($used_indexes[$idx])) {
+                    $map[$field_key] = $idx;
+                    $used_indexes[$idx] = true;
+                }
+            }
+        }
+    }
+
+    $custom_cols = [];
+    foreach ($map as $field_key => $idx) {
+        $field_key = (string) $field_key;
+        if (strpos($field_key, 'field:') !== 0) {
+            continue;
+        }
+        $field_name = substr($field_key, 6);
+        if ($field_name === '') {
+            continue;
+        }
+        $idx = intval($idx);
+        if (!isset($custom_cols[$idx])) {
+            $custom_cols[$idx] = $field_name;
+        }
+    }
+
+    if (empty($custom_cols)) {
+        $custom_cols = $custom_cols_fallback;
+    }
+    ksort($custom_cols);
+
+    return [
+        'header' => $header,
+        'map' => $map,
+        'indexes' => [
+            'id' => spe_get_map_index($map, 'id'),
+            'title' => spe_get_map_index($map, 'title'),
+            'slug' => spe_get_map_index($map, 'slug'),
+            'excerpt' => spe_get_map_index($map, 'excerpt'),
+            'content' => spe_get_map_index($map, 'content'),
+            'meta_title' => spe_get_map_index($map, 'meta_title'),
+            'meta_description' => spe_get_map_index($map, 'meta_description'),
+        ],
+        'custom_cols' => $custom_cols,
+    ];
+}
+
+/**
+ * 按 post_type + slug 匹配 post ID
+ */
+function spe_find_post_id_by_slug_for_post_type($post_type, $slug)
+{
+    $slug = trim((string) $slug);
+    if ($slug === '') {
+        return null;
+    }
+
+    if (function_exists('sanitize_title')) {
+        $slug = sanitize_title($slug);
+    }
+
+    if (!function_exists('get_posts')) {
+        return null;
+    }
+
+    $ids = get_posts([
+        'post_type' => $post_type,
+        'name' => $slug,
+        'post_status' => ['publish', 'draft', 'private', 'pending', 'future'],
+        'posts_per_page' => 1,
+        'fields' => 'ids',
+        'no_found_rows' => true,
+        'suppress_filters' => false,
+    ]);
+
+    if (is_array($ids) && !empty($ids)) {
+        $id = intval($ids[0]);
+        return $id > 0 ? $id : null;
+    }
+
+    return null;
+}
+
+/**
+ * 按 post_type + meta 唯一键匹配 post ID 列表
+ *
+ * @return int[]
+ */
+function spe_find_post_ids_by_meta_for_post_type($post_type, $meta_key, $meta_value, $limit = 2)
+{
+    $meta_key = trim((string) $meta_key);
+    $meta_value = (string) $meta_value;
+    $limit = max(1, intval($limit));
+
+    if ($meta_key === '' || $meta_value === '' || !function_exists('get_posts')) {
+        return [];
+    }
+
+    $ids = get_posts([
+        'post_type' => $post_type,
+        'post_status' => ['publish', 'draft', 'private', 'pending', 'future'],
+        'posts_per_page' => $limit,
+        'fields' => 'ids',
+        'no_found_rows' => true,
+        'suppress_filters' => false,
+        'meta_key' => $meta_key,
+        'meta_value' => $meta_value,
+    ]);
+
+    if (!is_array($ids)) {
+        return [];
+    }
+
+    $normalized = array_values(array_unique(array_filter(array_map(function ($item) {
+        $id = intval($item);
+        return $id > 0 ? $id : 0;
+    }, $ids))));
+
+    return $normalized;
+}
+
+/**
+ * 对单行 post 导入数据执行匹配（ID > slug > unique_meta）
+ */
+function spe_resolve_post_import_match($row, $map, $post_type, $match_profile = [], $callbacks_override = [])
+{
+    $row = is_array($row) ? $row : [];
+    $map = is_array($map) ? $map : [];
+    $callbacks_override = is_array($callbacks_override) ? $callbacks_override : [];
+
+    $profile = array_merge(spe_get_post_import_match_profile($post_type), is_array($match_profile) ? $match_profile : []);
+    $profile['strategies'] = isset($profile['strategies']) && is_array($profile['strategies'])
+        ? $profile['strategies']
+        : ['id', 'slug', 'unique_meta'];
+
+    $id_idx = spe_get_map_index($map, 'id');
+    $slug_idx = spe_get_map_index($map, 'slug');
+    $row_data = [];
+    if ($id_idx !== false) {
+        $row_data['id'] = spe_get_row_value_by_index($row, $id_idx);
+    }
+    if ($slug_idx !== false) {
+        $row_data['slug'] = spe_get_row_value_by_index($row, $slug_idx);
+    }
+
+    $unique_meta_field = trim((string) ($profile['unique_meta_field'] ?? ''));
+    $unique_meta_key = trim((string) ($profile['unique_meta_key'] ?? ''));
+    $unique_map_key = '';
+    if ($unique_meta_field !== '') {
+        if (array_key_exists($unique_meta_field, $map)) {
+            $unique_map_key = $unique_meta_field;
+        } elseif (array_key_exists('field:' . $unique_meta_field, $map)) {
+            $unique_map_key = 'field:' . $unique_meta_field;
+        }
+    }
+    if ($unique_meta_field !== '' && $unique_map_key !== '') {
+        $row_data[$unique_meta_field] = spe_get_row_value_by_index($row, intval($map[$unique_map_key]));
+    } else {
+        $unique_meta_field = '';
+        $unique_meta_key = '';
+    }
+
+    $callbacks = [
+        'find_by_id' => function ($id) use ($post_type) {
+            $id = intval($id);
+            if ($id <= 0 || !function_exists('get_post')) {
+                return null;
+            }
+            $post = get_post($id);
+            if (!$post || is_wp_error($post) || (string) $post->post_type !== (string) $post_type) {
+                return null;
+            }
+            return $id;
+        },
+        'find_by_slug' => function ($slug) use ($post_type) {
+            return spe_find_post_id_by_slug_for_post_type($post_type, $slug);
+        },
+        'find_by_meta' => function ($meta_key, $meta_value) use ($post_type) {
+            $ids = spe_find_post_ids_by_meta_for_post_type($post_type, $meta_key, $meta_value, 2);
+            if (count($ids) === 1) {
+                return $ids[0];
+            }
+            if (count($ids) > 1) {
+                return $ids;
+            }
+            return null;
+        },
+    ];
+    $callbacks = array_merge($callbacks, $callbacks_override);
+
+    $engine = spe_get_match_engine();
+    if (!$engine || !method_exists($engine, 'resolve')) {
+        $fallback_id = isset($row_data['id']) ? intval(preg_replace('/[^0-9]/', '', (string) $row_data['id'])) : 0;
+        if ($fallback_id > 0 && isset($callbacks['find_by_id']) && is_callable($callbacks['find_by_id'])) {
+            $matched = call_user_func($callbacks['find_by_id'], $fallback_id);
+            $matched_id = intval($matched);
+            if ($matched_id > 0) {
+                return ['matched_id' => $matched_id, 'action' => 'update', 'error' => '', 'strategy' => 'id'];
+            }
+        }
+        return ['matched_id' => null, 'action' => 'skip', 'error' => 'record not found by configured strategies', 'strategy' => 'none'];
+    }
+
+    $result = $engine->resolve($row_data, $callbacks, [
+        'id_field' => 'id',
+        'slug_field' => 'slug',
+        'unique_meta_field' => $unique_meta_field,
+        'unique_meta_key' => $unique_meta_key,
+        'allow_insert' => !empty($profile['allow_insert']),
+        'strategies' => $profile['strategies'],
+    ]);
+
+    if (!is_array($result)) {
+        return ['matched_id' => null, 'action' => 'skip', 'error' => 'invalid match result', 'strategy' => 'none'];
+    }
+
+    return [
+        'matched_id' => isset($result['matched_id']) && $result['matched_id'] !== null ? intval($result['matched_id']) : null,
+        'action' => (string) ($result['action'] ?? 'skip'),
+        'error' => (string) ($result['error'] ?? ''),
+        'strategy' => (string) ($result['strategy'] ?? 'none'),
+    ];
+}
+
+/**
+ * 获取 taxonomy 导入匹配配置
+ */
+function spe_get_taxonomy_import_match_profile($taxonomy)
+{
+    $profile = [
+        'strategies' => ['id', 'slug', 'unique_meta'],
+        'allow_insert' => false,
+        'unique_meta_key' => '',
+        'unique_meta_field' => '',
+    ];
+
+    if (function_exists('apply_filters')) {
+        $filtered = apply_filters('spe_taxonomy_import_match_profile', $profile, $taxonomy);
+        if (is_array($filtered)) {
+            $profile = array_merge($profile, $filtered);
+        }
+    }
+
+    if (!isset($profile['strategies']) || !is_array($profile['strategies'])) {
+        $profile['strategies'] = ['id', 'slug', 'unique_meta'];
+    }
+
+    $profile['strategies'] = array_values(array_unique(array_filter(array_map(function ($item) {
+        return trim((string) $item);
+    }, $profile['strategies']))));
+
+    $profile['allow_insert'] = !empty($profile['allow_insert']);
+    $profile['unique_meta_key'] = trim((string) ($profile['unique_meta_key'] ?? ''));
+    $profile['unique_meta_field'] = trim((string) ($profile['unique_meta_field'] ?? ''));
+
+    if ($profile['unique_meta_field'] !== '' && $profile['unique_meta_key'] === '') {
+        $profile['unique_meta_key'] = $profile['unique_meta_field'];
+    }
+
+    return $profile;
+}
+
+/**
+ * 构建 taxonomy 导入上下文（列映射 + 自定义字段）
+ */
+function spe_build_taxonomy_import_context($header, $taxonomy)
+{
+    $header = spe_normalize_csv_header($header);
+
+    $standard_cols = [
+        'id',
+        'term_id',
+        '标题',
+        '名称',
+        'name',
+        'title',
+        'slug',
+        '描述',
+        'description',
+        'parent',
+        '父分类 id',
+        'meta title',
+        'meta description',
+    ];
+
+    $custom_fields = [];
+    $custom_cols_fallback = [];
+    foreach ($header as $idx => $col_name) {
+        $col_name = (string) $col_name;
+        $col_lower = strtolower($col_name);
+        if (in_array($col_lower, $standard_cols, true)) {
+            continue;
+        }
+        if (spe_should_skip_helper_url_column($col_name, $header)) {
+            continue;
+        }
+        $custom_fields[] = $col_name;
+        $custom_cols_fallback[intval($idx)] = $col_name;
+    }
+
+    $map = [];
+    $discovery = spe_get_field_discovery();
+    $mapping_engine = spe_get_mapping_engine();
+    if ($discovery && $mapping_engine && method_exists($discovery, 'build_taxonomy_candidate_fields') && method_exists($mapping_engine, 'auto_map_headers')) {
+        $candidates = $discovery->build_taxonomy_candidate_fields($taxonomy, array_values(array_unique($custom_fields)));
+        $mapping_result = $mapping_engine->auto_map_headers($header, $candidates);
+        if (is_array($mapping_result) && isset($mapping_result['map']) && is_array($mapping_result['map'])) {
+            $map = $mapping_result['map'];
+        }
+    }
+
+    $fallback_aliases = [
+        'id' => ['ID', 'id', 'term_id'],
+        'name' => ['标题', '名称', 'name', 'Name', 'Title', 'title'],
+        'slug' => ['Slug', 'slug'],
+        'description' => ['描述', 'Description', 'description'],
+        'parent' => ['父分类 ID', 'parent', 'Parent'],
+        'meta_title' => ['Meta Title', 'meta title', 'title'],
+        'meta_description' => ['Meta Description', 'meta description', 'description'],
+    ];
+
+    $used_indexes = [];
+    foreach ($map as $mapped_idx) {
+        $used_indexes[intval($mapped_idx)] = true;
+    }
+
+    foreach ($fallback_aliases as $field_key => $aliases) {
+        if (!array_key_exists($field_key, $map)) {
+            $idx = spe_find_header_col($header, $aliases);
+            if ($idx !== false) {
+                $idx = intval($idx);
+                if (!isset($used_indexes[$idx])) {
+                    $map[$field_key] = $idx;
+                    $used_indexes[$idx] = true;
+                }
+            }
+        }
+    }
+
+    $custom_cols = [];
+    foreach ($map as $field_key => $idx) {
+        $field_key = (string) $field_key;
+        if (strpos($field_key, 'field:') !== 0) {
+            continue;
+        }
+        $field_name = substr($field_key, 6);
+        if ($field_name === '') {
+            continue;
+        }
+        $idx = intval($idx);
+        if (!isset($custom_cols[$idx])) {
+            $custom_cols[$idx] = $field_name;
+        }
+    }
+
+    if (empty($custom_cols)) {
+        $custom_cols = $custom_cols_fallback;
+    }
+    ksort($custom_cols);
+
+    return [
+        'header' => $header,
+        'map' => $map,
+        'indexes' => [
+            'id' => spe_get_map_index($map, 'id'),
+            'name' => spe_get_map_index($map, 'name'),
+            'slug' => spe_get_map_index($map, 'slug'),
+            'description' => spe_get_map_index($map, 'description'),
+            'parent' => spe_get_map_index($map, 'parent'),
+            'meta_title' => spe_get_map_index($map, 'meta_title'),
+            'meta_description' => spe_get_map_index($map, 'meta_description'),
+        ],
+        'custom_cols' => $custom_cols,
+    ];
+}
+
+/**
+ * 按 taxonomy + slug 匹配 term ID
+ */
+function spe_find_taxonomy_term_id_by_slug($taxonomy, $slug)
+{
+    $slug = trim((string) $slug);
+    if ($slug === '') {
+        return null;
+    }
+
+    if (strpos($slug, '/') !== false) {
+        $parts = explode('/', $slug);
+        $slug = (string) end($parts);
+    }
+
+    if (function_exists('sanitize_title')) {
+        $slug = sanitize_title($slug);
+    }
+
+    if (!function_exists('get_term_by')) {
+        return null;
+    }
+
+    $term = get_term_by('slug', $slug, $taxonomy);
+    if ($term && !is_wp_error($term)) {
+        $term_id = intval($term->term_id ?? 0);
+        return $term_id > 0 ? $term_id : null;
+    }
+
+    return null;
+}
+
+/**
+ * 按 taxonomy + meta 唯一键匹配 term ID 列表
+ *
+ * @return int[]
+ */
+function spe_find_taxonomy_term_ids_by_meta($taxonomy, $meta_key, $meta_value, $limit = 2)
+{
+    $meta_key = trim((string) $meta_key);
+    $meta_value = (string) $meta_value;
+    $limit = max(1, intval($limit));
+
+    if ($meta_key === '' || $meta_value === '' || !function_exists('get_terms')) {
+        return [];
+    }
+
+    $ids = get_terms([
+        'taxonomy' => $taxonomy,
+        'hide_empty' => false,
+        'fields' => 'ids',
+        'number' => $limit,
+        'meta_key' => $meta_key,
+        'meta_value' => $meta_value,
+    ]);
+
+    if (!is_array($ids)) {
+        return [];
+    }
+
+    $normalized = array_values(array_unique(array_filter(array_map(function ($item) {
+        $id = intval($item);
+        return $id > 0 ? $id : 0;
+    }, $ids))));
+
+    return $normalized;
+}
+
+/**
+ * 对单行 taxonomy 导入数据执行匹配（ID > slug > unique_meta）
+ */
+function spe_resolve_taxonomy_import_match($row, $map, $taxonomy, $match_profile = [], $callbacks_override = [])
+{
+    $row = is_array($row) ? $row : [];
+    $map = is_array($map) ? $map : [];
+    $callbacks_override = is_array($callbacks_override) ? $callbacks_override : [];
+
+    $profile = array_merge(spe_get_taxonomy_import_match_profile($taxonomy), is_array($match_profile) ? $match_profile : []);
+    $profile['strategies'] = isset($profile['strategies']) && is_array($profile['strategies'])
+        ? $profile['strategies']
+        : ['id', 'slug', 'unique_meta'];
+
+    $id_idx = spe_get_map_index($map, 'id');
+    $slug_idx = spe_get_map_index($map, 'slug');
+    $row_data = [];
+    if ($id_idx !== false) {
+        $row_data['id'] = spe_get_row_value_by_index($row, $id_idx);
+    }
+    if ($slug_idx !== false) {
+        $row_data['slug'] = spe_get_row_value_by_index($row, $slug_idx);
+    }
+
+    $unique_meta_field = trim((string) ($profile['unique_meta_field'] ?? ''));
+    $unique_meta_key = trim((string) ($profile['unique_meta_key'] ?? ''));
+    $unique_map_key = '';
+    if ($unique_meta_field !== '') {
+        if (array_key_exists($unique_meta_field, $map)) {
+            $unique_map_key = $unique_meta_field;
+        } elseif (array_key_exists('field:' . $unique_meta_field, $map)) {
+            $unique_map_key = 'field:' . $unique_meta_field;
+        }
+    }
+    if ($unique_meta_field !== '' && $unique_map_key !== '') {
+        $row_data[$unique_meta_field] = spe_get_row_value_by_index($row, intval($map[$unique_map_key]));
+    } else {
+        $unique_meta_field = '';
+        $unique_meta_key = '';
+    }
+
+    $callbacks = [
+        'find_by_id' => function ($id) use ($taxonomy) {
+            $id = intval($id);
+            if ($id <= 0 || !function_exists('get_term')) {
+                return null;
+            }
+            $term = get_term($id, $taxonomy);
+            if (!$term || is_wp_error($term)) {
+                return null;
+            }
+            return $id;
+        },
+        'find_by_slug' => function ($slug) use ($taxonomy) {
+            return spe_find_taxonomy_term_id_by_slug($taxonomy, $slug);
+        },
+        'find_by_meta' => function ($meta_key, $meta_value) use ($taxonomy) {
+            $ids = spe_find_taxonomy_term_ids_by_meta($taxonomy, $meta_key, $meta_value, 2);
+            if (count($ids) === 1) {
+                return $ids[0];
+            }
+            if (count($ids) > 1) {
+                return $ids;
+            }
+            return null;
+        },
+    ];
+    $callbacks = array_merge($callbacks, $callbacks_override);
+
+    $engine = spe_get_match_engine();
+    if (!$engine || !method_exists($engine, 'resolve')) {
+        $fallback_id = isset($row_data['id']) ? intval(preg_replace('/[^0-9]/', '', (string) $row_data['id'])) : 0;
+        if ($fallback_id > 0 && isset($callbacks['find_by_id']) && is_callable($callbacks['find_by_id'])) {
+            $matched = call_user_func($callbacks['find_by_id'], $fallback_id);
+            $matched_id = intval($matched);
+            if ($matched_id > 0) {
+                return ['matched_id' => $matched_id, 'action' => 'update', 'error' => '', 'strategy' => 'id'];
+            }
+        }
+        return ['matched_id' => null, 'action' => 'skip', 'error' => 'record not found by configured strategies', 'strategy' => 'none'];
+    }
+
+    $result = $engine->resolve($row_data, $callbacks, [
+        'id_field' => 'id',
+        'slug_field' => 'slug',
+        'unique_meta_field' => $unique_meta_field,
+        'unique_meta_key' => $unique_meta_key,
+        'allow_insert' => !empty($profile['allow_insert']),
+        'strategies' => $profile['strategies'],
+    ]);
+
+    if (!is_array($result)) {
+        return ['matched_id' => null, 'action' => 'skip', 'error' => 'invalid match result', 'strategy' => 'none'];
+    }
+
+    return [
+        'matched_id' => isset($result['matched_id']) && $result['matched_id'] !== null ? intval($result['matched_id']) : null,
+        'action' => (string) ($result['action'] ?? 'skip'),
+        'error' => (string) ($result['error'] ?? ''),
+        'strategy' => (string) ($result['strategy'] ?? 'none'),
+    ];
+}
+
+/**
+ * 根据请求参数覆盖 allow_insert
+ */
+function spe_resolve_allow_insert_override($profile, $request_keys = [])
+{
+    $profile = is_array($profile) ? $profile : [];
+    $request_keys = is_array($request_keys) ? $request_keys : [];
+    array_unshift($request_keys, 'spe_allow_insert');
+
+    foreach ($request_keys as $key) {
+        $key = trim((string) $key);
+        if ($key === '' || !isset($_POST[$key])) {
+            continue;
+        }
+
+        $raw = strtolower(trim((string) $_POST[$key]));
+        if (in_array($raw, ['1', 'true', 'yes', 'on'], true)) {
+            $profile['allow_insert'] = true;
+            return $profile;
+        }
+        if (in_array($raw, ['0', 'false', 'no', 'off'], true)) {
+            $profile['allow_insert'] = false;
+            return $profile;
+        }
+    }
+
+    return $profile;
+}
+
+/**
+ * 根据请求参数覆盖 unique meta 匹配配置
+ */
+function spe_resolve_unique_meta_override($profile, $field_keys = [], $key_keys = [])
+{
+    $profile = is_array($profile) ? $profile : [];
+    $field_keys = is_array($field_keys) ? $field_keys : [];
+    $key_keys = is_array($key_keys) ? $key_keys : [];
+
+    array_unshift($field_keys, 'spe_unique_meta_field');
+    array_unshift($key_keys, 'spe_unique_meta_key');
+
+    $unique_field = null;
+    foreach ($field_keys as $key) {
+        $key = trim((string) $key);
+        if ($key === '' || !isset($_POST[$key])) {
+            continue;
+        }
+        $value = trim((string) $_POST[$key]);
+        if ($value !== '') {
+            $unique_field = $value;
+        } else {
+            $unique_field = '';
+        }
+        break;
+    }
+
+    $unique_key = null;
+    foreach ($key_keys as $key) {
+        $key = trim((string) $key);
+        if ($key === '' || !isset($_POST[$key])) {
+            continue;
+        }
+        $value = trim((string) $_POST[$key]);
+        if ($value !== '') {
+            $unique_key = $value;
+        } else {
+            $unique_key = '';
+        }
+        break;
+    }
+
+    if ($unique_field !== null) {
+        $profile['unique_meta_field'] = $unique_field;
+    }
+    if ($unique_key !== null) {
+        $profile['unique_meta_key'] = $unique_key;
+    }
+
+    if (!empty($profile['unique_meta_field']) && empty($profile['unique_meta_key'])) {
+        $profile['unique_meta_key'] = (string) $profile['unique_meta_field'];
+    }
+
+    return $profile;
+}
+
+/**
+ * 获取导入 UI 默认配置（记忆上次输入）
+ */
+function spe_get_import_ui_defaults()
+{
+    $defaults = [
+        'product' => ['allow_insert' => false, 'unique_meta_field' => ''],
+        'page' => ['allow_insert' => false, 'unique_meta_field' => ''],
+        'post' => ['allow_insert' => false, 'unique_meta_field' => ''],
+        'taxonomy' => ['allow_insert' => false, 'unique_meta_field' => ''],
+    ];
+
+    if (function_exists('get_option')) {
+        $stored = get_option('spe_import_ui_defaults', []);
+        if (is_array($stored)) {
+            foreach ($defaults as $type => $meta) {
+                if (!isset($stored[$type]) || !is_array($stored[$type])) {
+                    continue;
+                }
+                $defaults[$type]['allow_insert'] = !empty($stored[$type]['allow_insert']);
+                $defaults[$type]['unique_meta_field'] = trim((string) ($stored[$type]['unique_meta_field'] ?? ''));
+            }
+        }
+    }
+
+    return $defaults;
+}
+
+/**
+ * 更新导入 UI 默认配置（记忆上次输入）
+ */
+function spe_update_import_ui_defaults($type, $allow_insert, $unique_meta_field)
+{
+    $type = trim((string) $type);
+    if (!in_array($type, ['product', 'page', 'post', 'taxonomy'], true)) {
+        return;
+    }
+
+    $defaults = spe_get_import_ui_defaults();
+    $defaults[$type] = [
+        'allow_insert' => !empty($allow_insert),
+        'unique_meta_field' => trim((string) $unique_meta_field),
+    ];
+
+    if (function_exists('update_option')) {
+        update_option('spe_import_ui_defaults', $defaults, false);
+    }
+}
+
+/**
+ * 将请求值转换为布尔
+ */
+function spe_request_to_bool($value)
+{
+    $raw = strtolower(trim((string) $value));
+    return in_array($raw, ['1', 'true', 'yes', 'on'], true);
+}
+
+/**
+ * 获取导入匹配配置模板
+ */
+function spe_get_import_match_profiles()
+{
+    $types = ['product', 'page', 'post', 'taxonomy'];
+    $profiles = [];
+    foreach ($types as $type) {
+        $profiles[$type] = [];
+    }
+
+    if (!function_exists('get_option')) {
+        return $profiles;
+    }
+
+    $stored = get_option('spe_import_match_profiles', []);
+    if (!is_array($stored)) {
+        return $profiles;
+    }
+
+    foreach ($types as $type) {
+        if (!isset($stored[$type]) || !is_array($stored[$type])) {
+            continue;
+        }
+
+        $normalized = [];
+        foreach ($stored[$type] as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+
+            $id = trim((string) ($item['id'] ?? ''));
+            $name = trim((string) ($item['name'] ?? ''));
+            if ($id === '' || $name === '') {
+                continue;
+            }
+
+            $unique_meta_field = trim((string) ($item['unique_meta_field'] ?? ''));
+            $unique_meta_key = trim((string) ($item['unique_meta_key'] ?? ''));
+            if ($unique_meta_field !== '' && $unique_meta_key === '') {
+                $unique_meta_key = $unique_meta_field;
+            }
+
+            $normalized[] = [
+                'id' => $id,
+                'name' => $name,
+                'allow_insert' => !empty($item['allow_insert']),
+                'unique_meta_field' => $unique_meta_field,
+                'unique_meta_key' => $unique_meta_key,
+                'updated_at' => trim((string) ($item['updated_at'] ?? '')),
+            ];
+        }
+
+        $profiles[$type] = $normalized;
+    }
+
+    return $profiles;
+}
+
+/**
+ * 保存导入匹配配置模板
+ *
+ * @return array{ok:bool,message:string,id:string}
+ */
+function spe_save_import_match_profile($type, $name, $config = [])
+{
+    $type = trim((string) $type);
+    if (!in_array($type, ['product', 'page', 'post', 'taxonomy'], true)) {
+        return ['ok' => false, 'message' => '无效的模板类型', 'id' => ''];
+    }
+
+    $name = trim((string) $name);
+    if ($name === '') {
+        return ['ok' => false, 'message' => '请输入模板名称', 'id' => ''];
+    }
+
+    $config = is_array($config) ? $config : [];
+    $allow_insert = !empty($config['allow_insert']);
+    $unique_meta_field = trim((string) ($config['unique_meta_field'] ?? ''));
+    $unique_meta_key = trim((string) ($config['unique_meta_key'] ?? ''));
+    if ($unique_meta_field !== '' && $unique_meta_key === '') {
+        $unique_meta_key = $unique_meta_field;
+    }
+
+    $slug_source = function_exists('sanitize_title') ? sanitize_title($name) : strtolower(preg_replace('/[^a-z0-9]+/i', '-', $name));
+    $id = trim((string) $slug_source);
+    if ($id === '') {
+        $id = 'profile-' . substr(md5($name), 0, 8);
+    }
+
+    $all_profiles = spe_get_import_match_profiles();
+    $target = isset($all_profiles[$type]) && is_array($all_profiles[$type]) ? $all_profiles[$type] : [];
+
+    $found = false;
+    foreach ($target as $idx => $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        if ((string) ($item['id'] ?? '') !== $id) {
+            continue;
+        }
+        $target[$idx] = [
+            'id' => $id,
+            'name' => $name,
+            'allow_insert' => $allow_insert,
+            'unique_meta_field' => $unique_meta_field,
+            'unique_meta_key' => $unique_meta_key,
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+        $found = true;
+        break;
+    }
+
+    if (!$found) {
+        $target[] = [
+            'id' => $id,
+            'name' => $name,
+            'allow_insert' => $allow_insert,
+            'unique_meta_field' => $unique_meta_field,
+            'unique_meta_key' => $unique_meta_key,
+            'updated_at' => date('Y-m-d H:i:s'),
+        ];
+    }
+
+    if (count($target) > 30) {
+        $target = array_slice($target, -30);
+    }
+
+    $all_profiles[$type] = array_values($target);
+    if (function_exists('update_option')) {
+        update_option('spe_import_match_profiles', $all_profiles, false);
+    }
+
+    return ['ok' => true, 'message' => '模板已保存', 'id' => $id];
+}
+
+/**
+ * 读取指定导入匹配模板
+ *
+ * @return array<string,mixed>|null
+ */
+function spe_get_import_match_profile_by_id($type, $id)
+{
+    $type = trim((string) $type);
+    $id = trim((string) $id);
+    if ($id === '') {
+        return null;
+    }
+
+    $all_profiles = spe_get_import_match_profiles();
+    if (!isset($all_profiles[$type]) || !is_array($all_profiles[$type])) {
+        return null;
+    }
+
+    foreach ($all_profiles[$type] as $item) {
+        if (!is_array($item)) {
+            continue;
+        }
+        if ((string) ($item['id'] ?? '') === $id) {
+            return $item;
+        }
+    }
+
+    return null;
+}
+
+/**
+ * 从请求中读取已选导入模板并返回配置
+ *
+ * @return array<string,mixed>
+ */
+function spe_resolve_import_match_profile_selection($type, $request_keys = [])
+{
+    $type = trim((string) $type);
+    if (!in_array($type, ['product', 'page', 'post', 'taxonomy'], true)) {
+        return [];
+    }
+
+    $request_keys = is_array($request_keys) ? $request_keys : [];
+    array_unshift($request_keys, 'spe_import_profile_id');
+
+    $profile_id = '';
+    foreach ($request_keys as $key) {
+        $key = trim((string) $key);
+        if ($key === '' || !isset($_POST[$key])) {
+            continue;
+        }
+        $profile_id = trim((string) $_POST[$key]);
+        if ($profile_id !== '') {
+            break;
+        }
+    }
+
+    if ($profile_id === '') {
+        return [];
+    }
+
+    $profile = spe_get_import_match_profile_by_id($type, $profile_id);
+    if (!is_array($profile)) {
+        return [];
+    }
+
+    return [
+        'allow_insert' => !empty($profile['allow_insert']),
+        'unique_meta_field' => trim((string) ($profile['unique_meta_field'] ?? '')),
+        'unique_meta_key' => trim((string) ($profile['unique_meta_key'] ?? '')),
+    ];
+}
+
+/**
+ * 根据导入行创建 post
+ */
+function spe_create_post_from_import_row($post_type, $row, $context)
+{
+    if (!function_exists('wp_insert_post')) {
+        return ['id' => 0, 'error' => 'wp_insert_post unavailable'];
+    }
+
+    $indexes = [];
+    if (is_array($context) && isset($context['indexes']) && is_array($context['indexes'])) {
+        $indexes = $context['indexes'];
+    }
+
+    $title = trim((string) spe_get_row_value_by_index($row, $indexes['title'] ?? false));
+    $slug_raw = trim((string) spe_get_row_value_by_index($row, $indexes['slug'] ?? false));
+    $excerpt = (string) spe_get_row_value_by_index($row, $indexes['excerpt'] ?? false);
+    $content = (string) spe_get_row_value_by_index($row, $indexes['content'] ?? false);
+
+    if (strpos($slug_raw, '/') !== false) {
+        $slug_parts = explode('/', $slug_raw);
+        $slug_raw = (string) end($slug_parts);
+    }
+
+    $insert_data = [
+        'post_type' => (string) $post_type,
+        'post_status' => 'draft',
+        'post_title' => $title !== '' ? $title : ('Imported ' . (string) $post_type . ' ' . date('Y-m-d H:i:s')),
+    ];
+
+    if ($slug_raw !== '') {
+        $insert_data['post_name'] = function_exists('sanitize_title') ? sanitize_title($slug_raw) : $slug_raw;
+    }
+    if ($excerpt !== '') {
+        $insert_data['post_excerpt'] = $excerpt;
+    }
+    if ($content !== '') {
+        $insert_data['post_content'] = $content;
+    }
+
+    $inserted = wp_insert_post($insert_data, true);
+    if (function_exists('is_wp_error') && is_wp_error($inserted)) {
+        return ['id' => 0, 'error' => (string) $inserted->get_error_message()];
+    }
+
+    $id = intval($inserted);
+    if ($id <= 0) {
+        return ['id' => 0, 'error' => 'wp_insert_post did not return valid ID'];
+    }
+
+    return ['id' => $id, 'error' => ''];
+}
+
+/**
+ * 根据导入行创建 taxonomy term
+ */
+function spe_create_taxonomy_term_from_import_row($taxonomy, $row, $context)
+{
+    if (!function_exists('wp_insert_term')) {
+        return ['id' => 0, 'error' => 'wp_insert_term unavailable'];
+    }
+
+    $indexes = [];
+    if (is_array($context) && isset($context['indexes']) && is_array($context['indexes'])) {
+        $indexes = $context['indexes'];
+    }
+
+    $name = trim((string) spe_get_row_value_by_index($row, $indexes['name'] ?? false));
+    $slug_raw = trim((string) spe_get_row_value_by_index($row, $indexes['slug'] ?? false));
+    $description = (string) spe_get_row_value_by_index($row, $indexes['description'] ?? false);
+    $parent_raw = trim((string) spe_get_row_value_by_index($row, $indexes['parent'] ?? false));
+
+    if (strpos($slug_raw, '/') !== false) {
+        $slug_parts = explode('/', $slug_raw);
+        $slug_raw = (string) end($slug_parts);
+    }
+
+    if ($name === '') {
+        $name = $slug_raw !== '' ? $slug_raw : ('Imported term ' . date('Y-m-d H:i:s'));
+    }
+
+    $args = [];
+    if ($slug_raw !== '') {
+        $args['slug'] = function_exists('sanitize_title') ? sanitize_title($slug_raw) : $slug_raw;
+    }
+    if ($description !== '') {
+        $args['description'] = $description;
+    }
+    if ($parent_raw !== '') {
+        $parent_id = intval(preg_replace('/[^0-9]/', '', $parent_raw));
+        if ($parent_id > 0) {
+            $args['parent'] = $parent_id;
+        }
+    }
+
+    $result = wp_insert_term($name, $taxonomy, $args);
+    if (function_exists('is_wp_error') && is_wp_error($result)) {
+        return ['id' => 0, 'error' => (string) $result->get_error_message()];
+    }
+
+    $term_id = 0;
+    if (is_array($result) && isset($result['term_id'])) {
+        $term_id = intval($result['term_id']);
+    } elseif (is_numeric($result)) {
+        $term_id = intval($result);
+    }
+
+    if ($term_id <= 0) {
+        return ['id' => 0, 'error' => 'wp_insert_term did not return valid term_id'];
+    }
+
+    return ['id' => $term_id, 'error' => ''];
+}
 
 function spe_add_admin_menu()
 {
@@ -1561,11 +2832,7 @@ function spe_generate_products_csv_string()
         'total_sales'
     ];
 
-    $custom_fields = spe_merge_export_custom_fields(
-        $all_meta_keys,
-        $exclude_keys,
-        spe_get_post_type_acf_field_names('product')
-    );
+    $custom_fields = spe_resolve_post_export_custom_fields('product', $all_meta_keys, $exclude_keys);
 
     $header = ['ID', '标题', 'Slug', '短描述', '长描述', 'Meta Title', 'Meta Description'];
     foreach ($custom_fields as $field) {
@@ -1683,11 +2950,7 @@ function spe_generate_pages_csv_string()
         '_wp_page_template',
     ];
 
-    $custom_fields = spe_merge_export_custom_fields(
-        $all_meta_keys,
-        $exclude_keys,
-        spe_get_post_type_acf_field_names('product')
-    );
+    $custom_fields = spe_resolve_post_export_custom_fields('page', $all_meta_keys, $exclude_keys);
 
     $header = ['ID', '标题', 'Slug', '摘要', '内容', 'Meta Title', 'Meta Description'];
     foreach ($custom_fields as $field) {
@@ -1805,11 +3068,7 @@ function spe_generate_posts_csv_string()
         '_wp_page_template',
     ];
 
-    $custom_fields = spe_merge_export_custom_fields(
-        $all_meta_keys,
-        $exclude_keys,
-        spe_get_post_type_acf_field_names('page')
-    );
+    $custom_fields = spe_resolve_post_export_custom_fields('post', $all_meta_keys, $exclude_keys);
 
     $header = ['ID', '标题', 'Slug', '摘要', '内容', 'Meta Title', 'Meta Description'];
     foreach ($custom_fields as $field) {
@@ -1990,21 +3249,104 @@ function spe_admin_page()
         spe_export_posts();
     }
 
-    if (isset($_POST['spe_import_products']) && wp_verify_nonce($_POST['spe_import_products'], 'spe_import')) {
+    if (isset($_POST['spe_save_profile_products']) && isset($_POST['spe_import_products']) && wp_verify_nonce($_POST['spe_import_products'], 'spe_import')) {
+        $saved = spe_save_import_match_profile('product', sanitize_text_field((string) ($_POST['spe_import_products_profile_name'] ?? '')), [
+            'allow_insert' => spe_request_to_bool($_POST['spe_import_products_allow_insert'] ?? ''),
+            'unique_meta_field' => sanitize_text_field((string) ($_POST['spe_import_products_unique_meta_field'] ?? '')),
+            'unique_meta_key' => sanitize_text_field((string) ($_POST['spe_import_products_unique_meta_key'] ?? '')),
+        ]);
+        if (!empty($saved['ok']) && !empty($saved['id'])) {
+            $_POST['spe_import_products_profile_id'] = (string) $saved['id'];
+        }
+        $result = ['error' => !$saved['ok'], 'message' => (string) $saved['message'], 'debug' => ''];
+        spe_update_import_ui_defaults(
+            'product',
+            spe_request_to_bool($_POST['spe_import_products_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_products_unique_meta_field'] ?? ''))
+        );
+    } elseif (isset($_POST['spe_import_products']) && wp_verify_nonce($_POST['spe_import_products'], 'spe_import')) {
         $result = spe_import_products();
-    }
-    if (isset($_POST['spe_import_taxonomies']) && wp_verify_nonce($_POST['spe_import_taxonomies'], 'spe_import_tax')) {
-        $taxonomy = isset($_POST['spe_taxonomy']) ? sanitize_text_field($_POST['spe_taxonomy']) : 'product_cat';
-        $result = spe_import_taxonomies($taxonomy);
-    }
-    if (isset($_POST['spe_import_pages']) && wp_verify_nonce($_POST['spe_import_pages'], 'spe_import_pages')) {
-        $result = spe_import_pages();
-    }
-    if (isset($_POST['spe_import_posts']) && wp_verify_nonce($_POST['spe_import_posts'], 'spe_import_posts')) {
-        $result = spe_import_posts();
+        spe_update_import_ui_defaults(
+            'product',
+            spe_request_to_bool($_POST['spe_import_products_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_products_unique_meta_field'] ?? ''))
+        );
     }
 
-    $taxonomies = get_taxonomies(['public' => true], 'objects');
+    if (isset($_POST['spe_save_profile_taxonomies']) && isset($_POST['spe_import_taxonomies']) && wp_verify_nonce($_POST['spe_import_taxonomies'], 'spe_import_tax')) {
+        $saved = spe_save_import_match_profile('taxonomy', sanitize_text_field((string) ($_POST['spe_import_taxonomies_profile_name'] ?? '')), [
+            'allow_insert' => spe_request_to_bool($_POST['spe_import_taxonomies_allow_insert'] ?? ''),
+            'unique_meta_field' => sanitize_text_field((string) ($_POST['spe_import_taxonomies_unique_meta_field'] ?? '')),
+            'unique_meta_key' => sanitize_text_field((string) ($_POST['spe_import_taxonomies_unique_meta_key'] ?? '')),
+        ]);
+        if (!empty($saved['ok']) && !empty($saved['id'])) {
+            $_POST['spe_import_taxonomies_profile_id'] = (string) $saved['id'];
+        }
+        $result = ['error' => !$saved['ok'], 'message' => (string) $saved['message'], 'debug' => ''];
+        spe_update_import_ui_defaults(
+            'taxonomy',
+            spe_request_to_bool($_POST['spe_import_taxonomies_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_taxonomies_unique_meta_field'] ?? ''))
+        );
+    } elseif (isset($_POST['spe_import_taxonomies']) && wp_verify_nonce($_POST['spe_import_taxonomies'], 'spe_import_tax')) {
+        $taxonomy = isset($_POST['spe_taxonomy']) ? sanitize_text_field($_POST['spe_taxonomy']) : 'product_cat';
+        $result = spe_import_taxonomies($taxonomy);
+        spe_update_import_ui_defaults(
+            'taxonomy',
+            spe_request_to_bool($_POST['spe_import_taxonomies_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_taxonomies_unique_meta_field'] ?? ''))
+        );
+    }
+
+    if (isset($_POST['spe_save_profile_pages']) && isset($_POST['spe_import_pages']) && wp_verify_nonce($_POST['spe_import_pages'], 'spe_import_pages')) {
+        $saved = spe_save_import_match_profile('page', sanitize_text_field((string) ($_POST['spe_import_pages_profile_name'] ?? '')), [
+            'allow_insert' => spe_request_to_bool($_POST['spe_import_pages_allow_insert'] ?? ''),
+            'unique_meta_field' => sanitize_text_field((string) ($_POST['spe_import_pages_unique_meta_field'] ?? '')),
+            'unique_meta_key' => sanitize_text_field((string) ($_POST['spe_import_pages_unique_meta_key'] ?? '')),
+        ]);
+        if (!empty($saved['ok']) && !empty($saved['id'])) {
+            $_POST['spe_import_pages_profile_id'] = (string) $saved['id'];
+        }
+        $result = ['error' => !$saved['ok'], 'message' => (string) $saved['message'], 'debug' => ''];
+        spe_update_import_ui_defaults(
+            'page',
+            spe_request_to_bool($_POST['spe_import_pages_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_pages_unique_meta_field'] ?? ''))
+        );
+    } elseif (isset($_POST['spe_import_pages']) && wp_verify_nonce($_POST['spe_import_pages'], 'spe_import_pages')) {
+        $result = spe_import_pages();
+        spe_update_import_ui_defaults(
+            'page',
+            spe_request_to_bool($_POST['spe_import_pages_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_pages_unique_meta_field'] ?? ''))
+        );
+    }
+
+    if (isset($_POST['spe_save_profile_posts']) && isset($_POST['spe_import_posts']) && wp_verify_nonce($_POST['spe_import_posts'], 'spe_import_posts')) {
+        $saved = spe_save_import_match_profile('post', sanitize_text_field((string) ($_POST['spe_import_posts_profile_name'] ?? '')), [
+            'allow_insert' => spe_request_to_bool($_POST['spe_import_posts_allow_insert'] ?? ''),
+            'unique_meta_field' => sanitize_text_field((string) ($_POST['spe_import_posts_unique_meta_field'] ?? '')),
+            'unique_meta_key' => sanitize_text_field((string) ($_POST['spe_import_posts_unique_meta_key'] ?? '')),
+        ]);
+        if (!empty($saved['ok']) && !empty($saved['id'])) {
+            $_POST['spe_import_posts_profile_id'] = (string) $saved['id'];
+        }
+        $result = ['error' => !$saved['ok'], 'message' => (string) $saved['message'], 'debug' => ''];
+        spe_update_import_ui_defaults(
+            'post',
+            spe_request_to_bool($_POST['spe_import_posts_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_posts_unique_meta_field'] ?? ''))
+        );
+    } elseif (isset($_POST['spe_import_posts']) && wp_verify_nonce($_POST['spe_import_posts'], 'spe_import_posts')) {
+        $result = spe_import_posts();
+        spe_update_import_ui_defaults(
+            'post',
+            spe_request_to_bool($_POST['spe_import_posts_allow_insert'] ?? ''),
+            sanitize_text_field((string) ($_POST['spe_import_posts_unique_meta_field'] ?? ''))
+        );
+    }
+
+    $taxonomies = spe_get_public_taxonomy_objects();
     if (!is_array($taxonomies) || empty($taxonomies)) {
         $taxonomies = [];
     }
@@ -2021,6 +3363,10 @@ function spe_admin_page()
     if (!isset($taxonomies[$bundle_taxonomy_ui])) {
         $bundle_taxonomy_ui = $default_taxonomy;
     }
+    $import_taxonomy_ui = isset($_POST['spe_taxonomy']) ? sanitize_text_field((string) $_POST['spe_taxonomy']) : $default_taxonomy;
+    if (!isset($taxonomies[$import_taxonomy_ui])) {
+        $import_taxonomy_ui = $default_taxonomy;
+    }
 
     $selected_tax_fields_ui = spe_resolve_taxonomy_export_fields(
         $export_taxonomy_ui,
@@ -2029,6 +3375,41 @@ function spe_admin_page()
 
     $taxonomy_field_options = spe_get_taxonomy_export_field_options($export_taxonomy_ui);
     $tax_field_nonce = wp_create_nonce('spe_tax_fields_nonce');
+    $import_ui_defaults = spe_get_import_ui_defaults();
+    $product_import_defaults = isset($import_ui_defaults['product']) && is_array($import_ui_defaults['product']) ? $import_ui_defaults['product'] : ['allow_insert' => false, 'unique_meta_field' => ''];
+    $page_import_defaults = isset($import_ui_defaults['page']) && is_array($import_ui_defaults['page']) ? $import_ui_defaults['page'] : ['allow_insert' => false, 'unique_meta_field' => ''];
+    $post_import_defaults = isset($import_ui_defaults['post']) && is_array($import_ui_defaults['post']) ? $import_ui_defaults['post'] : ['allow_insert' => false, 'unique_meta_field' => ''];
+    $taxonomy_import_defaults = isset($import_ui_defaults['taxonomy']) && is_array($import_ui_defaults['taxonomy']) ? $import_ui_defaults['taxonomy'] : ['allow_insert' => false, 'unique_meta_field' => ''];
+    $import_match_profiles = spe_get_import_match_profiles();
+    $product_import_profiles = isset($import_match_profiles['product']) && is_array($import_match_profiles['product']) ? $import_match_profiles['product'] : [];
+    $page_import_profiles = isset($import_match_profiles['page']) && is_array($import_match_profiles['page']) ? $import_match_profiles['page'] : [];
+    $post_import_profiles = isset($import_match_profiles['post']) && is_array($import_match_profiles['post']) ? $import_match_profiles['post'] : [];
+    $taxonomy_import_profiles = isset($import_match_profiles['taxonomy']) && is_array($import_match_profiles['taxonomy']) ? $import_match_profiles['taxonomy'] : [];
+    $selected_product_profile_id = isset($_POST['spe_import_products_profile_id']) ? sanitize_text_field((string) $_POST['spe_import_products_profile_id']) : '';
+    $selected_page_profile_id = isset($_POST['spe_import_pages_profile_id']) ? sanitize_text_field((string) $_POST['spe_import_pages_profile_id']) : '';
+    $selected_post_profile_id = isset($_POST['spe_import_posts_profile_id']) ? sanitize_text_field((string) $_POST['spe_import_posts_profile_id']) : '';
+    $selected_taxonomy_profile_id = isset($_POST['spe_import_taxonomies_profile_id']) ? sanitize_text_field((string) $_POST['spe_import_taxonomies_profile_id']) : '';
+
+    $selected_product_profile = spe_get_import_match_profile_by_id('product', $selected_product_profile_id);
+    if (is_array($selected_product_profile)) {
+        $product_import_defaults['allow_insert'] = !empty($selected_product_profile['allow_insert']);
+        $product_import_defaults['unique_meta_field'] = trim((string) ($selected_product_profile['unique_meta_field'] ?? ''));
+    }
+    $selected_page_profile = spe_get_import_match_profile_by_id('page', $selected_page_profile_id);
+    if (is_array($selected_page_profile)) {
+        $page_import_defaults['allow_insert'] = !empty($selected_page_profile['allow_insert']);
+        $page_import_defaults['unique_meta_field'] = trim((string) ($selected_page_profile['unique_meta_field'] ?? ''));
+    }
+    $selected_post_profile = spe_get_import_match_profile_by_id('post', $selected_post_profile_id);
+    if (is_array($selected_post_profile)) {
+        $post_import_defaults['allow_insert'] = !empty($selected_post_profile['allow_insert']);
+        $post_import_defaults['unique_meta_field'] = trim((string) ($selected_post_profile['unique_meta_field'] ?? ''));
+    }
+    $selected_taxonomy_profile = spe_get_import_match_profile_by_id('taxonomy', $selected_taxonomy_profile_id);
+    if (is_array($selected_taxonomy_profile)) {
+        $taxonomy_import_defaults['allow_insert'] = !empty($selected_taxonomy_profile['allow_insert']);
+        $taxonomy_import_defaults['unique_meta_field'] = trim((string) ($selected_taxonomy_profile['unique_meta_field'] ?? ''));
+    }
 
     ?>
     <div class="wrap spe-admin">
@@ -2470,12 +3851,55 @@ function spe_admin_page()
 
                     <div class="spe-card">
                         <h3>产品导入</h3>
-                        <p>上传 UTF-8 编码 CSV 文件，按 ID 更新产品。</p>
+                        <p>上传 UTF-8 编码 CSV 文件，按 ID/Slug/唯一键匹配更新产品。</p>
                         <form method="post" enctype="multipart/form-data">
                             <?php wp_nonce_field('spe_import', 'spe_import_products'); ?>
                             <input type="file" name="spe_import_file" accept=".csv" required>
+                            <div class="spe-form-row">
+                                <input type="hidden" name="spe_import_products_allow_insert" value="0">
+                                <label class="spe-check-item">
+                                    <input type="checkbox" name="spe_import_products_allow_insert" value="1" data-spe-default="<?php echo !empty($product_import_defaults['allow_insert']) ? '1' : '0'; ?>" <?php checked(!empty($product_import_defaults['allow_insert']), true); ?>>
+                                    未匹配时新增产品（草稿）
+                                </label>
+                                <div class="spe-hint">默认关闭。开启后，未匹配行会新增产品并继续写入字段。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>唯一键字段（可选）</label>
+                                <input type="text" name="spe_import_products_unique_meta_field" placeholder="例如：supplier_sku"
+                                    data-spe-default="<?php echo esc_attr((string) ($product_import_defaults['unique_meta_field'] ?? '')); ?>"
+                                    value="<?php echo esc_attr((string) ($product_import_defaults['unique_meta_field'] ?? '')); ?>">
+                                <div class="spe-hint">当 ID/Slug 未命中时，按该 meta 字段值做唯一匹配。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>匹配模板（可选）</label>
+                                <select name="spe_import_products_profile_id" data-spe-profile-sync="1" data-spe-allow-target="spe_import_products_allow_insert" data-spe-unique-target="spe_import_products_unique_meta_field">
+                                    <option value="">不使用模板</option>
+                                    <?php foreach ($product_import_profiles as $profile_item): ?>
+                                        <?php
+                                        $profile_id = isset($profile_item['id']) ? (string) $profile_item['id'] : '';
+                                        $profile_name = isset($profile_item['name']) ? (string) $profile_item['name'] : $profile_id;
+                                        $profile_allow_insert = !empty($profile_item['allow_insert']) ? '1' : '0';
+                                        $profile_unique_meta_field = (string) ($profile_item['unique_meta_field'] ?? '');
+                                        if ($profile_id === '') {
+                                            continue;
+                                        }
+                                        ?>
+                                        <option value="<?php echo esc_attr($profile_id); ?>" data-allow-insert="<?php echo esc_attr($profile_allow_insert); ?>" data-unique-meta-field="<?php echo esc_attr($profile_unique_meta_field); ?>" <?php selected($profile_id, $selected_product_profile_id); ?>>
+                                            <?php echo esc_html($profile_name); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="spe-hint">导入时会先应用模板，再应用当前表单值。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>保存当前设置为模板（可选）</label>
+                                <input type="text" name="spe_import_products_profile_name" placeholder="例如：产品-SKU匹配">
+                            </div>
                             <div class="spe-button-row">
                                 <button type="submit" class="button button-secondary">上传产品 CSV</button>
+                                <button type="submit" class="button spe-button-ghost" formnovalidate name="spe_save_profile_products" value="1">
+                                    保存产品导入模板
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -2498,12 +3922,55 @@ function spe_admin_page()
 
                     <div class="spe-card">
                         <h3>页面导入</h3>
-                        <p>上传 CSV 并按 ID 更新页面内容。</p>
+                        <p>上传 CSV 并按 ID/Slug/唯一键匹配更新页面。</p>
                         <form method="post" enctype="multipart/form-data">
                             <?php wp_nonce_field('spe_import_pages', 'spe_import_pages'); ?>
                             <input type="file" name="spe_import_pages_file" accept=".csv" required>
+                            <div class="spe-form-row">
+                                <input type="hidden" name="spe_import_pages_allow_insert" value="0">
+                                <label class="spe-check-item">
+                                    <input type="checkbox" name="spe_import_pages_allow_insert" value="1" data-spe-default="<?php echo !empty($page_import_defaults['allow_insert']) ? '1' : '0'; ?>" <?php checked(!empty($page_import_defaults['allow_insert']), true); ?>>
+                                    未匹配时新增页面（草稿）
+                                </label>
+                                <div class="spe-hint">默认关闭。开启后，未匹配行会新增页面并继续写入字段。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>唯一键字段（可选）</label>
+                                <input type="text" name="spe_import_pages_unique_meta_field" placeholder="例如：external_page_id"
+                                    data-spe-default="<?php echo esc_attr((string) ($page_import_defaults['unique_meta_field'] ?? '')); ?>"
+                                    value="<?php echo esc_attr((string) ($page_import_defaults['unique_meta_field'] ?? '')); ?>">
+                                <div class="spe-hint">当 ID/Slug 未命中时，按该 meta 字段值做唯一匹配。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>匹配模板（可选）</label>
+                                <select name="spe_import_pages_profile_id" data-spe-profile-sync="1" data-spe-allow-target="spe_import_pages_allow_insert" data-spe-unique-target="spe_import_pages_unique_meta_field">
+                                    <option value="">不使用模板</option>
+                                    <?php foreach ($page_import_profiles as $profile_item): ?>
+                                        <?php
+                                        $profile_id = isset($profile_item['id']) ? (string) $profile_item['id'] : '';
+                                        $profile_name = isset($profile_item['name']) ? (string) $profile_item['name'] : $profile_id;
+                                        $profile_allow_insert = !empty($profile_item['allow_insert']) ? '1' : '0';
+                                        $profile_unique_meta_field = (string) ($profile_item['unique_meta_field'] ?? '');
+                                        if ($profile_id === '') {
+                                            continue;
+                                        }
+                                        ?>
+                                        <option value="<?php echo esc_attr($profile_id); ?>" data-allow-insert="<?php echo esc_attr($profile_allow_insert); ?>" data-unique-meta-field="<?php echo esc_attr($profile_unique_meta_field); ?>" <?php selected($profile_id, $selected_page_profile_id); ?>>
+                                            <?php echo esc_html($profile_name); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="spe-hint">导入时会先应用模板，再应用当前表单值。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>保存当前设置为模板（可选）</label>
+                                <input type="text" name="spe_import_pages_profile_name" placeholder="例如：页面-外部ID匹配">
+                            </div>
                             <div class="spe-button-row">
                                 <button type="submit" class="button button-secondary">上传页面 CSV</button>
+                                <button type="submit" class="button spe-button-ghost" formnovalidate name="spe_save_profile_pages" value="1">
+                                    保存页面导入模板
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -2567,12 +4034,55 @@ function spe_admin_page()
 
                     <div class="spe-card">
                         <h3>文章导入</h3>
-                        <p>上传 CSV 并按 ID 更新文章内容。</p>
+                        <p>上传 CSV 并按 ID/Slug/唯一键匹配更新文章。</p>
                         <form method="post" enctype="multipart/form-data">
                             <?php wp_nonce_field('spe_import_posts', 'spe_import_posts'); ?>
                             <input type="file" name="spe_import_posts_file" accept=".csv" required>
+                            <div class="spe-form-row">
+                                <input type="hidden" name="spe_import_posts_allow_insert" value="0">
+                                <label class="spe-check-item">
+                                    <input type="checkbox" name="spe_import_posts_allow_insert" value="1" data-spe-default="<?php echo !empty($post_import_defaults['allow_insert']) ? '1' : '0'; ?>" <?php checked(!empty($post_import_defaults['allow_insert']), true); ?>>
+                                    未匹配时新增文章（草稿）
+                                </label>
+                                <div class="spe-hint">默认关闭。开启后，未匹配行会新增文章并继续写入字段。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>唯一键字段（可选）</label>
+                                <input type="text" name="spe_import_posts_unique_meta_field" placeholder="例如：external_post_id"
+                                    data-spe-default="<?php echo esc_attr((string) ($post_import_defaults['unique_meta_field'] ?? '')); ?>"
+                                    value="<?php echo esc_attr((string) ($post_import_defaults['unique_meta_field'] ?? '')); ?>">
+                                <div class="spe-hint">当 ID/Slug 未命中时，按该 meta 字段值做唯一匹配。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>匹配模板（可选）</label>
+                                <select name="spe_import_posts_profile_id" data-spe-profile-sync="1" data-spe-allow-target="spe_import_posts_allow_insert" data-spe-unique-target="spe_import_posts_unique_meta_field">
+                                    <option value="">不使用模板</option>
+                                    <?php foreach ($post_import_profiles as $profile_item): ?>
+                                        <?php
+                                        $profile_id = isset($profile_item['id']) ? (string) $profile_item['id'] : '';
+                                        $profile_name = isset($profile_item['name']) ? (string) $profile_item['name'] : $profile_id;
+                                        $profile_allow_insert = !empty($profile_item['allow_insert']) ? '1' : '0';
+                                        $profile_unique_meta_field = (string) ($profile_item['unique_meta_field'] ?? '');
+                                        if ($profile_id === '') {
+                                            continue;
+                                        }
+                                        ?>
+                                        <option value="<?php echo esc_attr($profile_id); ?>" data-allow-insert="<?php echo esc_attr($profile_allow_insert); ?>" data-unique-meta-field="<?php echo esc_attr($profile_unique_meta_field); ?>" <?php selected($profile_id, $selected_post_profile_id); ?>>
+                                            <?php echo esc_html($profile_name); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="spe-hint">导入时会先应用模板，再应用当前表单值。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>保存当前设置为模板（可选）</label>
+                                <input type="text" name="spe_import_posts_profile_name" placeholder="例如：文章-外部ID匹配">
+                            </div>
                             <div class="spe-button-row">
                                 <button type="submit" class="button button-secondary">上传文章 CSV</button>
+                                <button type="submit" class="button spe-button-ghost" formnovalidate name="spe_save_profile_posts" value="1">
+                                    保存文章导入模板
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -2620,7 +4130,7 @@ function spe_admin_page()
 
                     <div class="spe-card">
                         <h3>分类导入</h3>
-                        <p>上传 CSV 并按 ID/term_id 更新分类字段。</p>
+                        <p>上传 CSV 并按 ID/Slug/唯一键匹配更新分类字段。</p>
                         <form method="post" enctype="multipart/form-data">
                             <?php wp_nonce_field('spe_import_tax', 'spe_import_taxonomies'); ?>
 
@@ -2629,7 +4139,7 @@ function spe_admin_page()
                                 <select name="spe_taxonomy">
                                     <?php
                                     foreach ($taxonomies as $tax) {
-                                        $selected_attr = selected($tax->name, $default_taxonomy, false);
+                                        $selected_attr = selected($tax->name, $import_taxonomy_ui, false);
                                         echo '<option value="' . esc_attr($tax->name) . '" ' . $selected_attr . '>' . esc_html($tax->label) . ' (' . esc_html($tax->name) . ')</option>';
                                     }
                                     ?>
@@ -2637,8 +4147,51 @@ function spe_admin_page()
                             </div>
 
                             <input type="file" name="spe_import_taxonomy_file" accept=".csv" required>
+                            <div class="spe-form-row">
+                                <input type="hidden" name="spe_import_taxonomies_allow_insert" value="0">
+                                <label class="spe-check-item">
+                                    <input type="checkbox" name="spe_import_taxonomies_allow_insert" value="1" data-spe-default="<?php echo !empty($taxonomy_import_defaults['allow_insert']) ? '1' : '0'; ?>" <?php checked(!empty($taxonomy_import_defaults['allow_insert']), true); ?>>
+                                    未匹配时新增分类
+                                </label>
+                                <div class="spe-hint">默认关闭。开启后，未匹配行会新增 term 并继续写入字段。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>唯一键字段（可选）</label>
+                                <input type="text" name="spe_import_taxonomies_unique_meta_field" placeholder="例如：legacy_code"
+                                    data-spe-default="<?php echo esc_attr((string) ($taxonomy_import_defaults['unique_meta_field'] ?? '')); ?>"
+                                    value="<?php echo esc_attr((string) ($taxonomy_import_defaults['unique_meta_field'] ?? '')); ?>">
+                                <div class="spe-hint">当 ID/Slug 未命中时，按该 term_meta 字段值做唯一匹配。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>匹配模板（可选）</label>
+                                <select name="spe_import_taxonomies_profile_id" data-spe-profile-sync="1" data-spe-allow-target="spe_import_taxonomies_allow_insert" data-spe-unique-target="spe_import_taxonomies_unique_meta_field">
+                                    <option value="">不使用模板</option>
+                                    <?php foreach ($taxonomy_import_profiles as $profile_item): ?>
+                                        <?php
+                                        $profile_id = isset($profile_item['id']) ? (string) $profile_item['id'] : '';
+                                        $profile_name = isset($profile_item['name']) ? (string) $profile_item['name'] : $profile_id;
+                                        $profile_allow_insert = !empty($profile_item['allow_insert']) ? '1' : '0';
+                                        $profile_unique_meta_field = (string) ($profile_item['unique_meta_field'] ?? '');
+                                        if ($profile_id === '') {
+                                            continue;
+                                        }
+                                        ?>
+                                        <option value="<?php echo esc_attr($profile_id); ?>" data-allow-insert="<?php echo esc_attr($profile_allow_insert); ?>" data-unique-meta-field="<?php echo esc_attr($profile_unique_meta_field); ?>" <?php selected($profile_id, $selected_taxonomy_profile_id); ?>>
+                                            <?php echo esc_html($profile_name); ?>
+                                        </option>
+                                    <?php endforeach; ?>
+                                </select>
+                                <div class="spe-hint">导入时会先应用模板，再应用当前表单值。</div>
+                            </div>
+                            <div class="spe-form-row">
+                                <label>保存当前设置为模板（可选）</label>
+                                <input type="text" name="spe_import_taxonomies_profile_name" placeholder="例如：分类-legacy_code匹配">
+                            </div>
                             <div class="spe-button-row">
                                 <button type="submit" class="button button-secondary">上传分类 CSV</button>
+                                <button type="submit" class="button spe-button-ghost" formnovalidate name="spe_save_profile_taxonomies" value="1">
+                                    保存分类导入模板
+                                </button>
                             </div>
                         </form>
                     </div>
@@ -2649,7 +4202,9 @@ function spe_admin_page()
                 <div class="spe-card">
                     <h3>使用说明</h3>
                     <ul>
-                        <li>导入通过 ID 列匹配并更新目标内容。</li>
+                        <li>导入支持 ID / Slug / 唯一键（可配置）匹配策略。</li>
+                        <li>可选“未匹配时新增”，默认关闭（建议先在测试站验证）。</li>
+                        <li>唯一键字段可在每个导入面板直接填写，无需改代码。</li>
                         <li>批量导出可一次下载 taxonomy/product/page/post 多类 CSV（ZIP）。</li>
                         <li>分类导出支持字段级选择，适合最小化回导流程。</li>
                         <li>附件字段会自动补充对应的 <code>_url</code> 辅助列。</li>
@@ -2709,6 +4264,38 @@ function spe_admin_page()
                         }
                     });
                 }
+
+                root.querySelectorAll('select[data-spe-profile-sync="1"]').forEach((select) => {
+                    const form = select.closest('form');
+                    if (!form) return;
+
+                    const allowTarget = select.getAttribute('data-spe-allow-target') || '';
+                    const uniqueTarget = select.getAttribute('data-spe-unique-target') || '';
+                    const allowCheckbox = allowTarget ? form.querySelector('input[type="checkbox"][name="' + allowTarget + '"]') : null;
+                    const uniqueInput = uniqueTarget ? form.querySelector('input[type="text"][name="' + uniqueTarget + '"]') : null;
+                    if (!allowCheckbox || !uniqueInput) {
+                        return;
+                    }
+
+                    const applyProfile = () => {
+                        const selectedOption = select.options[select.selectedIndex];
+                        const hasProfile = !!select.value;
+                        if (!selectedOption || !hasProfile) {
+                            allowCheckbox.checked = (allowCheckbox.getAttribute('data-spe-default') || '0') === '1';
+                            uniqueInput.value = uniqueInput.getAttribute('data-spe-default') || '';
+                            return;
+                        }
+
+                        allowCheckbox.checked = (selectedOption.getAttribute('data-allow-insert') || '0') === '1';
+                        uniqueInput.value = selectedOption.getAttribute('data-unique-meta-field') || '';
+                    };
+
+                    select.addEventListener('change', applyProfile);
+
+                    if (select.value) {
+                        applyProfile();
+                    }
+                });
 
                 const initialTaxonomy = <?php echo wp_json_encode($export_taxonomy_ui); ?>;
                 const fieldMap = {};
@@ -3071,11 +4658,7 @@ function spe_export_products()
         'total_sales'
     ];
 
-    $custom_fields = spe_merge_export_custom_fields(
-        $all_meta_keys,
-        $exclude_keys,
-        spe_get_post_type_acf_field_names('post')
-    );
+    $custom_fields = spe_resolve_post_export_custom_fields('product', $all_meta_keys, $exclude_keys);
 
     // 基础字段
     $header = ['ID', '标题', 'Slug', '短描述', '长描述'];
@@ -3352,58 +4935,93 @@ function spe_import_products()
     }
     $header = spe_normalize_csv_header($header);
 
-    $id_col = spe_find_header_col($header, ['ID']);
-    $title_col = spe_find_header_col($header, ['标题', 'Title']);
-    $slug_col = spe_find_header_col($header, ['Slug']);
-    $short_desc_col = spe_find_header_col($header, ['短描述', 'Short Description']);
-    $long_desc_col = spe_find_header_col($header, ['长描述', 'Long Description']);
-    $meta_title_col = spe_find_header_col($header, ['Meta Title']);
-    $meta_desc_col = spe_find_header_col($header, ['Meta Description']);
+    $context = spe_build_post_import_context($header, 'product');
+    $map = $context['map'];
+    $id_col = $context['indexes']['id'];
+    $title_col = $context['indexes']['title'];
+    $slug_col = $context['indexes']['slug'];
+    $short_desc_col = $context['indexes']['excerpt'];
+    $long_desc_col = $context['indexes']['content'];
+    $meta_title_col = $context['indexes']['meta_title'];
+    $meta_desc_col = $context['indexes']['meta_description'];
+    $custom_cols = $context['custom_cols'];
 
-    if ($id_col === false) {
-        fclose($handle);
-        return ['error' => true, 'message' => '导入失败：缺少 ID 列（支持 ID，大小写不敏感）。'];
+    $match_profile = spe_get_post_import_match_profile('product');
+    $selected_profile = spe_resolve_import_match_profile_selection('product', ['spe_import_products_profile_id']);
+    if (!empty($selected_profile)) {
+        $match_profile = array_merge($match_profile, $selected_profile);
     }
+    $match_profile = spe_resolve_allow_insert_override($match_profile, ['spe_import_products_allow_insert']);
+    $match_profile = spe_resolve_unique_meta_override(
+        $match_profile,
+        ['spe_import_products_unique_meta_field'],
+        ['spe_import_products_unique_meta_key']
+    );
+    $unique_meta_field = trim((string) ($match_profile['unique_meta_field'] ?? ''));
+    $has_unique_mapping = $unique_meta_field !== ''
+        && (array_key_exists($unique_meta_field, $map) || array_key_exists('field:' . $unique_meta_field, $map));
 
-    $custom_cols = [];
-    foreach ($header as $idx => $col_name) {
-        $col_lower = strtolower((string) $col_name);
-        // 排除所有已知的标准列（中英文）
-        if (!in_array($col_lower, ['id', '标题', 'title', 'slug', '短描述', 'short description', '长描述', 'long description', 'meta title', 'meta description'], true)) {
-            if (spe_should_skip_helper_url_column($col_name, $header)) {
-                continue;
-            }
-            $custom_cols[$idx] = $col_name;
-        }
+    if ($id_col === false && $slug_col === false && !$has_unique_mapping) {
+        fclose($handle);
+        return ['error' => true, 'message' => '导入失败：缺少可匹配列。至少需要 ID/Slug，或配置并映射唯一键字段。'];
     }
 
     $updated = 0;
+    $inserted = 0;
     $not_found = 0;
+    $insert_failed = 0;
 
     while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
-        $product_id = ($id_col !== false && isset($row[$id_col])) ? intval(preg_replace('/[^0-9]/', '', (string) $row[$id_col])) : 0;
-        if (!$product_id)
-            continue;
+        $match = spe_resolve_post_import_match($row, $map, 'product', $match_profile);
+        $match_action = (string) ($match['action'] ?? 'skip');
+        $product_id = 0;
 
-        $product = wc_get_product($product_id);
-        if (!$product) {
+        if ($match_action === 'insert') {
+            $created = spe_create_post_from_import_row('product', $row, $context);
+            if (!empty($created['error']) || empty($created['id'])) {
+                $insert_failed++;
+                continue;
+            }
+            $product_id = intval($created['id']);
+            $inserted++;
+        } elseif ($match_action === 'update' && !empty($match['matched_id'])) {
+            $product_id = intval($match['matched_id']);
+        } else {
             $not_found++;
             continue;
         }
 
+        if ($match_action === 'update' && function_exists('wc_get_product')) {
+            $product = wc_get_product($product_id);
+            if (!$product) {
+                $not_found++;
+                continue;
+            }
+        } elseif ($match_action === 'update') {
+            $product = function_exists('get_post') ? get_post($product_id) : null;
+            if (!$product || is_wp_error($product) || (string) $product->post_type !== 'product') {
+                $not_found++;
+                continue;
+            }
+        }
+
         // 更新基础字段
         $update_data = [];
-        if ($title_col !== false && isset($row[$title_col]) && $row[$title_col] !== '') {
-            $update_data['post_title'] = $row[$title_col];
+        $title_value = spe_get_row_value_by_index($row, $title_col);
+        if ($title_col !== false && $title_value !== '') {
+            $update_data['post_title'] = $title_value;
         }
-        if ($slug_col !== false && isset($row[$slug_col]) && $row[$slug_col] !== '') {
-            $update_data['post_name'] = sanitize_title($row[$slug_col]);
+        $slug_value = spe_get_row_value_by_index($row, $slug_col);
+        if ($slug_col !== false && $slug_value !== '') {
+            $update_data['post_name'] = sanitize_title($slug_value);
         }
-        if ($short_desc_col !== false && isset($row[$short_desc_col]) && $row[$short_desc_col] !== '') {
-            $update_data['post_excerpt'] = $row[$short_desc_col];
+        $short_desc_value = spe_get_row_value_by_index($row, $short_desc_col);
+        if ($short_desc_col !== false && $short_desc_value !== '') {
+            $update_data['post_excerpt'] = $short_desc_value;
         }
-        if ($long_desc_col !== false && isset($row[$long_desc_col]) && $row[$long_desc_col] !== '') {
-            $update_data['post_content'] = $row[$long_desc_col];
+        $long_desc_value = spe_get_row_value_by_index($row, $long_desc_col);
+        if ($long_desc_col !== false && $long_desc_value !== '') {
+            $update_data['post_content'] = $long_desc_value;
         }
 
         if (!empty($update_data)) {
@@ -3411,19 +5029,27 @@ function spe_import_products()
             wp_update_post($update_data);
         }
 
-        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
-            ? $row[$meta_title_col]
-            : null;
-        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
-            ? $row[$meta_desc_col]
-            : null;
+        $meta_title_value = null;
+        if ($meta_title_col !== false) {
+            $meta_title_raw = spe_get_row_value_by_index($row, $meta_title_col);
+            if ($meta_title_raw !== '') {
+                $meta_title_value = $meta_title_raw;
+            }
+        }
+        $meta_desc_value = null;
+        if ($meta_desc_col !== false) {
+            $meta_desc_raw = spe_get_row_value_by_index($row, $meta_desc_col);
+            if ($meta_desc_raw !== '') {
+                $meta_desc_value = $meta_desc_raw;
+            }
+        }
         if ($meta_title_value !== null || $meta_desc_value !== null) {
             spe_sync_post_seo_meta_by_active_provider($product_id, $meta_title_value, $meta_desc_value);
         }
 
         // 自定义字段
         foreach ($custom_cols as $idx => $field_name) {
-            $value = $row[$idx] ?? '';
+            $value = spe_get_row_value_by_index($row, $idx);
             if ($value !== '') {
                 spe_update_post_custom_field($product_id, $field_name, $value);
             }
@@ -3435,8 +5061,15 @@ function spe_import_products()
     fclose($handle);
 
     $msg = "产品导入完成！更新了 {$updated} 个产品";
-    if ($not_found > 0)
-        $msg .= "，{$not_found} 个 ID 未找到";
+    if ($inserted > 0) {
+        $msg .= "，新增 {$inserted} 个产品";
+    }
+    if ($not_found > 0) {
+        $msg .= "，{$not_found} 行未匹配到产品";
+    }
+    if ($insert_failed > 0) {
+        $msg .= "，{$insert_failed} 行新增失败";
+    }
     return ['error' => false, 'message' => $msg, 'debug' => ''];
 }
 
@@ -3462,43 +5095,40 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
         fclose($handle);
         return ['error' => true, 'message' => 'CSV 文件为空或格式错误'];
     }
-    $header = spe_normalize_csv_header($header);
+    $context = spe_build_taxonomy_import_context($header, $taxonomy);
+    $map = $context['map'];
+    $id_col = $context['indexes']['id'];
+    $name_col = $context['indexes']['name'];
+    $slug_col = $context['indexes']['slug'];
+    $desc_col = $context['indexes']['description'];
+    $parent_col = $context['indexes']['parent'];
+    $meta_title_col = $context['indexes']['meta_title'];
+    $meta_desc_col = $context['indexes']['meta_description'];
+    $custom_cols = $context['custom_cols'];
 
-    $id_col = spe_find_header_col($header, ['ID', 'term_id']);
-    $name_col = spe_find_header_col($header, ['标题', '名称', 'name']);
-    $slug_col = spe_find_header_col($header, ['Slug', 'slug']);
-
-    // 匹配描述列（AIOSEO用description作为SEO描述，不是分类描述）
-    $desc_col = spe_find_header_col($header, ['描述']);
-
-    // 匹配父分类ID列
-    $parent_col = spe_find_header_col($header, ['父分类 ID', 'parent']);
-
-    // 匹配SEO标题列（AIOSEO用title列）
-    $meta_title_col = spe_find_header_col($header, ['Meta Title', 'title']);
-
-    // 匹配SEO描述列（AIOSEO用description列）
-    $meta_desc_col = spe_find_header_col($header, ['Meta Description', 'description']);
-
-    if ($id_col === false) {
-        fclose($handle);
-        return ['error' => true, 'message' => '导入失败：缺少 ID 或 term_id 列。'];
+    $match_profile = spe_get_taxonomy_import_match_profile($taxonomy);
+    $selected_profile = spe_resolve_import_match_profile_selection('taxonomy', ['spe_import_taxonomies_profile_id']);
+    if (!empty($selected_profile)) {
+        $match_profile = array_merge($match_profile, $selected_profile);
     }
+    $match_profile = spe_resolve_allow_insert_override($match_profile, ['spe_import_taxonomies_allow_insert']);
+    $match_profile = spe_resolve_unique_meta_override(
+        $match_profile,
+        ['spe_import_taxonomies_unique_meta_field'],
+        ['spe_import_taxonomies_unique_meta_key']
+    );
+    $unique_meta_field = trim((string) ($match_profile['unique_meta_field'] ?? ''));
+    $has_unique_mapping = $unique_meta_field !== ''
+        && (array_key_exists($unique_meta_field, $map) || array_key_exists('field:' . $unique_meta_field, $map));
 
-    $custom_cols = [];
-    foreach ($header as $idx => $col_name) {
-        $col_lower = strtolower((string) $col_name);
-        // 排除已知的标准列
-        if (!in_array($col_lower, ['id', 'term_id', '标题', '名称', 'name', 'slug', '描述', 'parent', '父分类 id', 'meta title', 'meta description', 'title', 'description'], true)) {
-            if (spe_should_skip_helper_url_column($col_name, $header)) {
-                continue;
-            }
-            $custom_cols[$idx] = $col_name;
-        }
+    if ($id_col === false && $slug_col === false && !$has_unique_mapping) {
+        fclose($handle);
+        return ['error' => true, 'message' => '导入失败：缺少可匹配列。至少需要 ID/Slug，或配置并映射唯一键字段。'];
     }
 
     $active_seo_provider = spe_get_active_seo_provider();
     $updated = 0;
+    $inserted = 0;
     $not_found = 0;
     $no_changes = 0;
     $processed = 0;
@@ -3520,37 +5150,72 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
 
     while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
         $row_count++;
-        $cat_id_raw = ($id_col !== false && isset($row[$id_col])) ? trim((string) $row[$id_col]) : '';
-        $cat_id = intval(preg_replace('/[^0-9]/', '', $cat_id_raw));
 
-        if ($cat_id <= 0) {
-            $invalid_id++;
-            $append_debug("第 {$row_count} 行: ID 为空或无效，已跳过");
+        $cat_id_raw = ($id_col !== false) ? trim((string) spe_get_row_value_by_index($row, $id_col)) : '';
+        if ($cat_id_raw !== '') {
+            $cat_id_numeric = intval(preg_replace('/[^0-9]/', '', $cat_id_raw));
+            if ($cat_id_numeric <= 0) {
+                $invalid_id++;
+                $append_debug("第 {$row_count} 行: ID 格式无效，已尝试其他匹配策略");
+            }
+        }
+
+        $match = spe_resolve_taxonomy_import_match($row, $map, $taxonomy, $match_profile);
+        $match_action = (string) ($match['action'] ?? 'skip');
+        $cat_id = isset($match['matched_id']) && $match['matched_id'] !== null ? intval($match['matched_id']) : 0;
+
+        if ($match_action === 'error') {
+            $error_msg = "第 {$row_count} 行: 匹配冲突 - " . (string) ($match['error'] ?? '未知错误');
+            $errors[] = $error_msg;
+            $append_debug($error_msg);
+            continue;
+        }
+
+        $row_created = false;
+        if ($match_action === 'insert') {
+            $created = spe_create_taxonomy_term_from_import_row($taxonomy, $row, $context);
+            if (!empty($created['error']) || empty($created['id'])) {
+                $error_msg = "第 {$row_count} 行: 新增分类失败 - " . (!empty($created['error']) ? (string) $created['error'] : '未知错误');
+                $errors[] = $error_msg;
+                $append_debug($error_msg);
+                continue;
+            }
+            $cat_id = intval($created['id']);
+            $row_created = true;
+            $inserted++;
+            $append_debug("第 {$row_count} 行: 已新增分类 ID {$cat_id}");
+        }
+
+        if (($match_action !== 'update' && !$row_created) || $cat_id <= 0) {
+            $not_found++;
+            $append_debug("第 {$row_count} 行: 未匹配到分类（策略: " . (string) ($match['strategy'] ?? 'none') . "）");
             continue;
         }
 
         $cat = get_term($cat_id, $taxonomy);
         if (!$cat || is_wp_error($cat)) {
             $not_found++;
-            $append_debug("第 {$row_count} 行: ID {$cat_id} 未找到，已跳过");
+            $append_debug("第 {$row_count} 行: ID {$cat_id} 不属于 taxonomy {$taxonomy}，已跳过");
             continue;
         }
 
         $processed++;
-        $row_modified = false;
+        $row_modified = $row_created;
         $update_data = [];
         $row_slug_changed = false;
 
-        if ($name_col !== false && isset($row[$name_col]) && $row[$name_col] !== '') {
-            $new_name = $row[$name_col];
+        $name_value = spe_get_row_value_by_index($row, $name_col);
+        if ($name_col !== false && $name_value !== '') {
+            $new_name = $name_value;
             if ((string) $cat->name !== (string) $new_name) {
                 $update_data['name'] = $new_name;
             }
         }
 
-        if ($slug_col !== false && isset($row[$slug_col]) && trim((string) $row[$slug_col]) !== '') {
+        $slug_value = spe_get_row_value_by_index($row, $slug_col);
+        if ($slug_col !== false && trim((string) $slug_value) !== '') {
             $old_slug = (string) $cat->slug;
-            $new_slug_raw = (string) $row[$slug_col];
+            $new_slug_raw = (string) $slug_value;
 
             if (strpos($new_slug_raw, '/') !== false) {
                 $slug_parts = explode('/', $new_slug_raw);
@@ -3564,8 +5229,9 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
             }
         }
 
-        if ($desc_col !== false && isset($row[$desc_col]) && $row[$desc_col] !== '') {
-            $new_desc = $row[$desc_col];
+        $desc_value = spe_get_row_value_by_index($row, $desc_col);
+        if ($desc_col !== false && $desc_value !== '') {
+            $new_desc = $desc_value;
             if ((string) $cat->description !== (string) $new_desc) {
                 $update_data['description'] = $new_desc;
             }
@@ -3585,34 +5251,40 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
             }
         }
 
-        if ($parent_col !== false && isset($row[$parent_col])) {
-            $parent_raw = trim((string) $row[$parent_col]);
-            if ($parent_raw !== '') {
-                $parent_id = intval(preg_replace('/[^0-9]/', '', $parent_raw));
-                $old_parent = intval($cat->parent);
-                if ($old_parent !== $parent_id) {
-                    $parent_result = wp_update_term($cat_id, $taxonomy, ['parent' => $parent_id]);
-                    if (is_wp_error($parent_result)) {
-                        $error_msg = "第 {$row_count} 行: ID {$cat_id} 父分类更新失败 - " . $parent_result->get_error_message();
-                        $errors[] = $error_msg;
-                        $append_debug($error_msg);
-                    } else {
-                        $row_modified = true;
-                    }
+        $parent_raw = trim((string) spe_get_row_value_by_index($row, $parent_col));
+        if ($parent_col !== false && $parent_raw !== '') {
+            $parent_id = intval(preg_replace('/[^0-9]/', '', $parent_raw));
+            $old_parent = intval($cat->parent);
+            if ($old_parent !== $parent_id) {
+                $parent_result = wp_update_term($cat_id, $taxonomy, ['parent' => $parent_id]);
+                if (is_wp_error($parent_result)) {
+                    $error_msg = "第 {$row_count} 行: ID {$cat_id} 父分类更新失败 - " . $parent_result->get_error_message();
+                    $errors[] = $error_msg;
+                    $append_debug($error_msg);
+                } else {
+                    $row_modified = true;
                 }
             }
         }
 
-        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
-            ? $row[$meta_title_col]
-            : null;
-        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
-            ? $row[$meta_desc_col]
-            : null;
+        $meta_title_value = null;
+        if ($meta_title_col !== false) {
+            $meta_title_raw = spe_get_row_value_by_index($row, $meta_title_col);
+            if ($meta_title_raw !== '') {
+                $meta_title_value = $meta_title_raw;
+            }
+        }
+        $meta_desc_value = null;
+        if ($meta_desc_col !== false) {
+            $meta_desc_raw = spe_get_row_value_by_index($row, $meta_desc_col);
+            if ($meta_desc_raw !== '') {
+                $meta_desc_value = $meta_desc_raw;
+            }
+        }
 
         if ($meta_title_value !== null || $meta_desc_value !== null) {
             $sync_result = spe_sync_term_seo_meta_by_active_provider($cat_id, $taxonomy, $meta_title_value, $meta_desc_value);
-            if ($sync_result['provider'] === '') {
+            if (($sync_result['provider'] ?? '') === '') {
                 $append_debug("第 {$row_count} 行: ID {$cat_id} 未检测到激活 SEO 插件，SEO 字段已跳过");
             } else {
                 $row_modified = true;
@@ -3620,7 +5292,7 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
         }
 
         foreach ($custom_cols as $idx => $field_name) {
-            $value = $row[$idx] ?? '';
+            $value = spe_get_row_value_by_index($row, $idx);
             if ($value === '') {
                 continue;
             }
@@ -3646,12 +5318,15 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
         $debug_lines[] = "调试输出已截断（最多 {$max_debug_lines} 行）";
     }
 
-    $debug_lines[] = "汇总: 数据行 {$row_count}，有效ID {$processed}，更新 {$updated}，无变化 {$no_changes}，无效ID {$invalid_id}，未找到 {$not_found}，错误 " . count($errors);
+    $debug_lines[] = "汇总: 数据行 {$row_count}，匹配成功 {$processed}，更新 {$updated}，新增 {$inserted}，无变化 {$no_changes}，无效ID {$invalid_id}，未匹配 {$not_found}，错误 " . count($errors);
     $debug_log = implode("\n", $debug_lines);
 
     $msg = "分类导入完成！共处理 {$processed} 个分类";
     if ($updated > 0) {
         $msg .= "（{$updated} 个有更新）";
+    }
+    if ($inserted > 0) {
+        $msg .= "，新增 {$inserted} 个分类";
     }
     if ($no_changes > 0) {
         $msg .= "，{$no_changes} 个无变化";
@@ -3660,7 +5335,7 @@ function spe_import_taxonomies($taxonomy = 'product_cat')
         $msg .= "，{$invalid_id} 行 ID 无效";
     }
     if ($not_found > 0) {
-        $msg .= "，{$not_found} 个 ID 未找到";
+        $msg .= "，{$not_found} 行未匹配到分类";
     }
     if (!empty($errors)) {
         $msg .= "。错误: " . implode('; ', array_slice($errors, 0, 3));
@@ -3733,11 +5408,7 @@ function spe_export_pages()
         '_wp_page_template',
     ];
 
-    $custom_fields = spe_merge_export_custom_fields(
-        $all_meta_keys,
-        $exclude_keys,
-        spe_get_post_type_acf_field_names('page')
-    );
+    $custom_fields = spe_resolve_post_export_custom_fields('page', $all_meta_keys, $exclude_keys);
 
     // 基础字段
     $header = ['ID', '标题', 'Slug', '摘要', '内容'];
@@ -3978,11 +5649,7 @@ function spe_export_posts()
         '_wp_page_template',
     ];
 
-    $custom_fields = spe_merge_export_custom_fields(
-        $all_meta_keys,
-        $exclude_keys,
-        spe_get_post_type_acf_field_names('post')
-    );
+    $custom_fields = spe_resolve_post_export_custom_fields('post', $all_meta_keys, $exclude_keys);
 
     // 基础字段
     $header = ['ID', '标题', 'Slug', '摘要', '内容'];
@@ -4124,59 +5791,79 @@ function spe_import_pages()
     }
     $header = spe_normalize_csv_header($header);
 
-    $id_col = spe_find_header_col($header, ['ID']);
-    $title_col = spe_find_header_col($header, ['标题', 'Title']);
-    $slug_col = spe_find_header_col($header, ['Slug']);
-    $excerpt_col = spe_find_header_col($header, ['摘要', 'Excerpt']);
-    $content_col = spe_find_header_col($header, ['内容', 'Content']);
-    $meta_title_col = spe_find_header_col($header, ['Meta Title']);
-    $meta_desc_col = spe_find_header_col($header, ['Meta Description']);
+    $context = spe_build_post_import_context($header, 'page');
+    $map = $context['map'];
+    $id_col = $context['indexes']['id'];
+    $title_col = $context['indexes']['title'];
+    $slug_col = $context['indexes']['slug'];
+    $excerpt_col = $context['indexes']['excerpt'];
+    $content_col = $context['indexes']['content'];
+    $meta_title_col = $context['indexes']['meta_title'];
+    $meta_desc_col = $context['indexes']['meta_description'];
+    $custom_cols = $context['custom_cols'];
 
-    if ($id_col === false) {
-        fclose($handle);
-        return ['error' => true, 'message' => '导入失败：缺少 ID 列（支持 ID，大小写不敏感）。'];
+    $match_profile = spe_get_post_import_match_profile('page');
+    $selected_profile = spe_resolve_import_match_profile_selection('page', ['spe_import_pages_profile_id']);
+    if (!empty($selected_profile)) {
+        $match_profile = array_merge($match_profile, $selected_profile);
     }
+    $match_profile = spe_resolve_allow_insert_override($match_profile, ['spe_import_pages_allow_insert']);
+    $match_profile = spe_resolve_unique_meta_override(
+        $match_profile,
+        ['spe_import_pages_unique_meta_field'],
+        ['spe_import_pages_unique_meta_key']
+    );
+    $unique_meta_field = trim((string) ($match_profile['unique_meta_field'] ?? ''));
+    $has_unique_mapping = $unique_meta_field !== ''
+        && (array_key_exists($unique_meta_field, $map) || array_key_exists('field:' . $unique_meta_field, $map));
 
-    $custom_cols = [];
-    foreach ($header as $idx => $col_name) {
-        $col_lower = strtolower((string) $col_name);
-        // 排除所有已知的标准列（中英文）
-        if (!in_array($col_lower, ['id', '标题', 'title', 'slug', '摘要', 'excerpt', '内容', 'content', 'meta title', 'meta description'], true)) {
-            if (spe_should_skip_helper_url_column($col_name, $header)) {
-                continue;
-            }
-            $custom_cols[$idx] = $col_name;
-        }
+    if ($id_col === false && $slug_col === false && !$has_unique_mapping) {
+        fclose($handle);
+        return ['error' => true, 'message' => '导入失败：缺少可匹配列。至少需要 ID/Slug，或配置并映射唯一键字段。'];
     }
 
     $updated = 0;
+    $inserted = 0;
     $not_found = 0;
+    $insert_failed = 0;
 
     while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
-        $page_id = ($id_col !== false && isset($row[$id_col])) ? intval(preg_replace('/[^0-9]/', '', (string) $row[$id_col])) : 0;
-        if (!$page_id)
-            continue;
+        $match = spe_resolve_post_import_match($row, $map, 'page', $match_profile);
+        $match_action = (string) ($match['action'] ?? 'skip');
+        $page_id = 0;
 
-        // 检查是否是页面
-        $post = get_post($page_id);
-        if (!$post || $post->post_type !== 'page') {
+        if ($match_action === 'insert') {
+            $created = spe_create_post_from_import_row('page', $row, $context);
+            if (!empty($created['error']) || empty($created['id'])) {
+                $insert_failed++;
+                continue;
+            }
+            $page_id = intval($created['id']);
+            $inserted++;
+        } elseif ($match_action === 'update' && !empty($match['matched_id'])) {
+            $page_id = intval($match['matched_id']);
+        } else {
             $not_found++;
             continue;
         }
 
         // 更新基础字段
         $update_data = [];
-        if ($title_col !== false && isset($row[$title_col]) && $row[$title_col] !== '') {
-            $update_data['post_title'] = $row[$title_col];
+        $title_value = spe_get_row_value_by_index($row, $title_col);
+        if ($title_col !== false && $title_value !== '') {
+            $update_data['post_title'] = $title_value;
         }
-        if ($slug_col !== false && isset($row[$slug_col]) && $row[$slug_col] !== '') {
-            $update_data['post_name'] = sanitize_title($row[$slug_col]);
+        $slug_value = spe_get_row_value_by_index($row, $slug_col);
+        if ($slug_col !== false && $slug_value !== '') {
+            $update_data['post_name'] = sanitize_title($slug_value);
         }
-        if ($excerpt_col !== false && isset($row[$excerpt_col]) && $row[$excerpt_col] !== '') {
-            $update_data['post_excerpt'] = $row[$excerpt_col];
+        $excerpt_value = spe_get_row_value_by_index($row, $excerpt_col);
+        if ($excerpt_col !== false && $excerpt_value !== '') {
+            $update_data['post_excerpt'] = $excerpt_value;
         }
-        if ($content_col !== false && isset($row[$content_col]) && $row[$content_col] !== '') {
-            $update_data['post_content'] = $row[$content_col];
+        $content_value = spe_get_row_value_by_index($row, $content_col);
+        if ($content_col !== false && $content_value !== '') {
+            $update_data['post_content'] = $content_value;
         }
 
         if (!empty($update_data)) {
@@ -4184,25 +5871,29 @@ function spe_import_pages()
             wp_update_post($update_data);
         }
 
-        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
-            ? $row[$meta_title_col]
-            : null;
-        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
-            ? $row[$meta_desc_col]
-            : null;
+        $meta_title_value = null;
+        if ($meta_title_col !== false) {
+            $meta_title_raw = spe_get_row_value_by_index($row, $meta_title_col);
+            if ($meta_title_raw !== '') {
+                $meta_title_value = $meta_title_raw;
+            }
+        }
+        $meta_desc_value = null;
+        if ($meta_desc_col !== false) {
+            $meta_desc_raw = spe_get_row_value_by_index($row, $meta_desc_col);
+            if ($meta_desc_raw !== '') {
+                $meta_desc_value = $meta_desc_raw;
+            }
+        }
         if ($meta_title_value !== null || $meta_desc_value !== null) {
             spe_sync_post_seo_meta_by_active_provider($page_id, $meta_title_value, $meta_desc_value);
         }
 
         // 自定义字段
         foreach ($custom_cols as $idx => $field_name) {
-            $value = $row[$idx] ?? '';
+            $value = spe_get_row_value_by_index($row, $idx);
             if ($value !== '') {
-                $decoded = json_decode($value, true);
-                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                    $value = $decoded;
-                }
-                update_post_meta($page_id, $field_name, $value);
+                spe_update_post_custom_field($page_id, $field_name, $value);
             }
         }
 
@@ -4212,8 +5903,15 @@ function spe_import_pages()
     fclose($handle);
 
     $msg = "页面导入完成！更新了 {$updated} 个页面";
-    if ($not_found > 0)
-        $msg .= "，{$not_found} 个 ID 未找到或不是页面类型";
+    if ($inserted > 0) {
+        $msg .= "，新增 {$inserted} 个页面";
+    }
+    if ($not_found > 0) {
+        $msg .= "，{$not_found} 行未匹配到页面";
+    }
+    if ($insert_failed > 0) {
+        $msg .= "，{$insert_failed} 行新增失败";
+    }
     return ['error' => false, 'message' => $msg, 'debug' => ''];
 }
 
@@ -4241,59 +5939,79 @@ function spe_import_posts()
     }
     $header = spe_normalize_csv_header($header);
 
-    $id_col = spe_find_header_col($header, ['ID']);
-    $title_col = spe_find_header_col($header, ['标题', 'Title']);
-    $slug_col = spe_find_header_col($header, ['Slug']);
-    $excerpt_col = spe_find_header_col($header, ['摘要', 'Excerpt']);
-    $content_col = spe_find_header_col($header, ['内容', 'Content']);
-    $meta_title_col = spe_find_header_col($header, ['Meta Title']);
-    $meta_desc_col = spe_find_header_col($header, ['Meta Description']);
+    $context = spe_build_post_import_context($header, 'post');
+    $map = $context['map'];
+    $id_col = $context['indexes']['id'];
+    $title_col = $context['indexes']['title'];
+    $slug_col = $context['indexes']['slug'];
+    $excerpt_col = $context['indexes']['excerpt'];
+    $content_col = $context['indexes']['content'];
+    $meta_title_col = $context['indexes']['meta_title'];
+    $meta_desc_col = $context['indexes']['meta_description'];
+    $custom_cols = $context['custom_cols'];
 
-    if ($id_col === false) {
-        fclose($handle);
-        return ['error' => true, 'message' => '导入失败：缺少 ID 列（支持 ID，大小写不敏感）。'];
+    $match_profile = spe_get_post_import_match_profile('post');
+    $selected_profile = spe_resolve_import_match_profile_selection('post', ['spe_import_posts_profile_id']);
+    if (!empty($selected_profile)) {
+        $match_profile = array_merge($match_profile, $selected_profile);
     }
+    $match_profile = spe_resolve_allow_insert_override($match_profile, ['spe_import_posts_allow_insert']);
+    $match_profile = spe_resolve_unique_meta_override(
+        $match_profile,
+        ['spe_import_posts_unique_meta_field'],
+        ['spe_import_posts_unique_meta_key']
+    );
+    $unique_meta_field = trim((string) ($match_profile['unique_meta_field'] ?? ''));
+    $has_unique_mapping = $unique_meta_field !== ''
+        && (array_key_exists($unique_meta_field, $map) || array_key_exists('field:' . $unique_meta_field, $map));
 
-    $custom_cols = [];
-    foreach ($header as $idx => $col_name) {
-        $col_lower = strtolower((string) $col_name);
-        // 排除所有已知的标准列（中英文）
-        if (!in_array($col_lower, ['id', '标题', 'title', 'slug', '摘要', 'excerpt', '内容', 'content', 'meta title', 'meta description'], true)) {
-            if (spe_should_skip_helper_url_column($col_name, $header)) {
-                continue;
-            }
-            $custom_cols[$idx] = $col_name;
-        }
+    if ($id_col === false && $slug_col === false && !$has_unique_mapping) {
+        fclose($handle);
+        return ['error' => true, 'message' => '导入失败：缺少可匹配列。至少需要 ID/Slug，或配置并映射唯一键字段。'];
     }
 
     $updated = 0;
+    $inserted = 0;
     $not_found = 0;
+    $insert_failed = 0;
 
     while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
-        $post_id = ($id_col !== false && isset($row[$id_col])) ? intval(preg_replace('/[^0-9]/', '', (string) $row[$id_col])) : 0;
-        if (!$post_id)
-            continue;
+        $match = spe_resolve_post_import_match($row, $map, 'post', $match_profile);
+        $match_action = (string) ($match['action'] ?? 'skip');
+        $post_id = 0;
 
-        // 检查是否是文章
-        $post = get_post($post_id);
-        if (!$post || $post->post_type !== 'post') {
+        if ($match_action === 'insert') {
+            $created = spe_create_post_from_import_row('post', $row, $context);
+            if (!empty($created['error']) || empty($created['id'])) {
+                $insert_failed++;
+                continue;
+            }
+            $post_id = intval($created['id']);
+            $inserted++;
+        } elseif ($match_action === 'update' && !empty($match['matched_id'])) {
+            $post_id = intval($match['matched_id']);
+        } else {
             $not_found++;
             continue;
         }
 
         // 更新基础字段
         $update_data = [];
-        if ($title_col !== false && isset($row[$title_col]) && $row[$title_col] !== '') {
-            $update_data['post_title'] = $row[$title_col];
+        $title_value = spe_get_row_value_by_index($row, $title_col);
+        if ($title_col !== false && $title_value !== '') {
+            $update_data['post_title'] = $title_value;
         }
-        if ($slug_col !== false && isset($row[$slug_col]) && $row[$slug_col] !== '') {
-            $update_data['post_name'] = sanitize_title($row[$slug_col]);
+        $slug_value = spe_get_row_value_by_index($row, $slug_col);
+        if ($slug_col !== false && $slug_value !== '') {
+            $update_data['post_name'] = sanitize_title($slug_value);
         }
-        if ($excerpt_col !== false && isset($row[$excerpt_col]) && $row[$excerpt_col] !== '') {
-            $update_data['post_excerpt'] = $row[$excerpt_col];
+        $excerpt_value = spe_get_row_value_by_index($row, $excerpt_col);
+        if ($excerpt_col !== false && $excerpt_value !== '') {
+            $update_data['post_excerpt'] = $excerpt_value;
         }
-        if ($content_col !== false && isset($row[$content_col]) && $row[$content_col] !== '') {
-            $update_data['post_content'] = $row[$content_col];
+        $content_value = spe_get_row_value_by_index($row, $content_col);
+        if ($content_col !== false && $content_value !== '') {
+            $update_data['post_content'] = $content_value;
         }
 
         if (!empty($update_data)) {
@@ -4301,25 +6019,29 @@ function spe_import_posts()
             wp_update_post($update_data);
         }
 
-        $meta_title_value = ($meta_title_col !== false && isset($row[$meta_title_col]) && $row[$meta_title_col] !== '')
-            ? $row[$meta_title_col]
-            : null;
-        $meta_desc_value = ($meta_desc_col !== false && isset($row[$meta_desc_col]) && $row[$meta_desc_col] !== '')
-            ? $row[$meta_desc_col]
-            : null;
+        $meta_title_value = null;
+        if ($meta_title_col !== false) {
+            $meta_title_raw = spe_get_row_value_by_index($row, $meta_title_col);
+            if ($meta_title_raw !== '') {
+                $meta_title_value = $meta_title_raw;
+            }
+        }
+        $meta_desc_value = null;
+        if ($meta_desc_col !== false) {
+            $meta_desc_raw = spe_get_row_value_by_index($row, $meta_desc_col);
+            if ($meta_desc_raw !== '') {
+                $meta_desc_value = $meta_desc_raw;
+            }
+        }
         if ($meta_title_value !== null || $meta_desc_value !== null) {
             spe_sync_post_seo_meta_by_active_provider($post_id, $meta_title_value, $meta_desc_value);
         }
 
         // 自定义字段
         foreach ($custom_cols as $idx => $field_name) {
-            $value = $row[$idx] ?? '';
+            $value = spe_get_row_value_by_index($row, $idx);
             if ($value !== '') {
-                $decoded = json_decode($value, true);
-                if (json_last_error() === JSON_ERROR_NONE && is_array($decoded)) {
-                    $value = $decoded;
-                }
-                update_post_meta($post_id, $field_name, $value);
+                spe_update_post_custom_field($post_id, $field_name, $value);
             }
         }
 
@@ -4329,7 +6051,14 @@ function spe_import_posts()
     fclose($handle);
 
     $msg = "文章导入完成！更新了 {$updated} 个文章";
-    if ($not_found > 0)
-        $msg .= "，{$not_found} 个 ID 未找到或不是文章类型";
+    if ($inserted > 0) {
+        $msg .= "，新增 {$inserted} 个文章";
+    }
+    if ($not_found > 0) {
+        $msg .= "，{$not_found} 行未匹配到文章";
+    }
+    if ($insert_failed > 0) {
+        $msg .= "，{$insert_failed} 行新增失败";
+    }
     return ['error' => false, 'message' => $msg, 'debug' => ''];
 }

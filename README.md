@@ -17,6 +17,9 @@
 - 按分类和关键词筛选导出
 - 分类字段级选择导出（支持最小化回导）
 - 异常行 + 汇总导入日志输出
+- 导入匹配策略：ID / Slug / 唯一键（可配置）
+- 可选未匹配新增：支持产品、页面、文章、分类（默认关闭）
+- 后台导入面板可直接填写唯一键字段（无需改代码）
 
 ## 版本信息
 
@@ -29,6 +32,8 @@
 - 通用安装包别名：`simple-product-export.zip`
 - 文档目录：`docs/`
   - `docs/GITHUB_PROJECT_OVERVIEW.md`（GitHub 功能总览）
+  - `docs/PRD-universal-import-export.md`（通用平台产品边界）
+  - `docs/plans/2026-02-13-universal-import-export-platform.md`（实施计划）
   - `docs/RELEASE_NOTES_v4.7.6.md`
   - `docs/CSV_CONTRACT.md`
   - `docs/FAILURE_MATRIX.md`
@@ -36,8 +41,30 @@
 ## GitHub 文档入口
 
 - 项目功能总览：`docs/GITHUB_PROJECT_OVERVIEW.md`
+- 通用平台 PRD：`docs/PRD-universal-import-export.md`
+- 通用平台实施计划：`docs/plans/2026-02-13-universal-import-export-platform.md`
 - CSV 契约：`docs/CSV_CONTRACT.md`
 - 常见问题矩阵：`docs/FAILURE_MATRIX.md`
+
+## 通用平台能力矩阵（v5 规划）
+
+| 能力 | 当前状态 | 备注 |
+|------|----------|------|
+| 任意 public post type/taxonomy 导入导出 | 进行中 | 当前已覆盖 `post/page/product` 与分类法主流程 |
+| ACF 自动发现（post + taxonomy） | 已支持 | 包含“有定义但暂无值”的字段 |
+| 字段映射向导（自动映射+手动覆盖） | 规划中 | 目标是替代固定列名依赖 |
+| 匹配策略（ID/slug/唯一键） | 已支持 | 后台可配置唯一键字段，按策略回退匹配 |
+| 未匹配时新增（allow_insert） | 已支持 | 四类导入均可勾选，默认关闭 |
+| 流式分批导入（可续跑） | 规划中 | 当前已有行级处理与异常日志 |
+| 多实体打包导出 | 已支持 | `taxonomy/product/page/post` 可一次 ZIP 导出 |
+| 定时任务（自动导入导出） | 规划中 | 预期基于 WP Cron |
+| 仅异常行 + 汇总日志 | 已支持 | 导入日志已按此策略简化 |
+
+## 明确不做（当前阶段）
+
+- 不做页面构建器级拖拽编辑器。
+- 不做跨平台连接器（Shopify/Airtable/Notion）直连。
+- 不做冗余的全量审计日志，只保留异常行与汇总。
 
 ## 安装说明
 
