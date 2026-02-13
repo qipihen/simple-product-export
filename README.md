@@ -23,18 +23,18 @@
 
 ## 版本信息
 
-**当前版本：** 4.7.6
+**当前版本：** 4.7.7
 
 ## 本地交付文件（都在本目录）
 
 - 插件源码：`simple-product-export.php`
-- 最新打包：`simple-product-export-v4.7.6.zip`
+- 最新打包：`simple-product-export-v4.7.7.zip`
 - 通用安装包别名：`simple-product-export.zip`
 - 文档目录：`docs/`
   - `docs/GITHUB_PROJECT_OVERVIEW.md`（GitHub 功能总览）
   - `docs/PRD-universal-import-export.md`（通用平台产品边界）
   - `docs/plans/2026-02-13-universal-import-export-platform.md`（实施计划）
-  - `docs/RELEASE_NOTES_v4.7.6.md`
+  - `docs/RELEASE_NOTES_v4.7.7.md`
   - `docs/CSV_CONTRACT.md`
   - `docs/FAILURE_MATRIX.md`
 
@@ -45,6 +45,7 @@
 - 通用平台实施计划：`docs/plans/2026-02-13-universal-import-export-platform.md`
 - CSV 契约：`docs/CSV_CONTRACT.md`
 - 常见问题矩阵：`docs/FAILURE_MATRIX.md`
+- 自动发版工作流：`.github/workflows/release.yml`
 
 ## 通用平台能力矩阵（v5 规划）
 
@@ -125,6 +126,12 @@ portable-ev-charger/gem-series
 插件会自动提取最后一部分作为实际 slug，即 `gem-series`。
 
 ## 版本历史
+
+### v4.7.7 (2026-02-13)
+- 新增导入匹配模板应用逻辑（产品/页面/文章/分类）
+- 新增导入模板保存后自动回填与选择同步能力
+- 修复分类字段首屏预加载开销，改为仅按当前 taxonomy 异步加载
+- 新增 GitHub Actions 自动 Release（按 `v*` tag 自动打包并发布）
 
 ### v4.7.6 (2026-02-12)
 - 新增 ZIP/XLSX 误传检测（`PK\x03\x04` 文件头）

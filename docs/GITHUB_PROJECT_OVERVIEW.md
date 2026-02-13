@@ -92,7 +92,7 @@
 
 - CSV 契约：`docs/CSV_CONTRACT.md`
 - 常见失败矩阵：`docs/FAILURE_MATRIX.md`
-- 版本说明：`docs/RELEASE_NOTES_v4.7.6.md`
+- 版本说明：`docs/RELEASE_NOTES_v4.7.7.md`
 
 ## 7. 安装与验证
 

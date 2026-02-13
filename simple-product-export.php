@@ -3,7 +3,7 @@
 Plugin Name: 产品导入导出工具
 Plugin URI: https://github.com/yourusername/simple-product-export
 Description: 导出/导入 产品、页面、文章 和分类 CSV，包含所有自定义字段，支持筛选导出
-Version: 4.7.6
+Version: 4.7.7
 Author: zhangkun
 License: GPL v2 or later
 */
